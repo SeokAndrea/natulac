@@ -1,0 +1,155 @@
+/*
+ * Indicadores (prototipo aprobado 2026-10-14): tablero mensual por línea y
+ * presentación. Cada mes es AUTOMÁTICO (lo calcula la app, ver
+ * automatico.ts) o MANUAL (lo carga a mano la analista). Las dos formas
+ * dan un DatosMes, así la pantalla no distingue de dónde vino. Ausentismo
+ * e incidencias son siempre a mano: salen de lo guardado aunque el mes
+ * sea automático.
+ * Un número vacío (null) se muestra "—".
+ */
+
+export type ModoMes = "AUTO" | "MANUAL"
+
+/** Una causa de parada no programada en el mes. */
+export interface ParadaMes {
+  causa: string
+  minutos: number | null
+  veces: number | null
+}
+
+export interface DatosPresentacion {
+  /** Si no se corrió (y no tiene plan), no aparece. */
+  corrio: boolean
+  /** Cajas producidas (Producto Terminado). */
+  prod: number | null
+  /** Cajas planeadas (Programación). */
+  plan: number | null
+  /** Merma de envases, %. */
+  merma: number | null
+  /** Envases perdidos ("Equivalencia en unidades" del Excel). */
+  mermaUnidades?: number | null
+  /** % de cumplimiento cargado a mano cuando no hay cajas (ej. julio y agosto del Excel). Con cajas, manda prod ÷ plan. */
+  cumplimiento?: number | null
+  paradas: ParadaMes[]
+}
+
+/** Ausentismo de un grupo, como en el informe (siempre a mano). */
+export interface AusentismoGrupo {
+  /** "1", "2", "3". */
+  grupo: string
+  /** % de ausentismo del grupo. */
+  porcentaje: number | null
+  /** % de las horas perdidas del mes que fueron de este grupo. */
+  partePerdidas: number | null
+  /** Quién incidió más y cuántos días. */
+  quien: string
+  dias: number | null
+}
+
+export interface Ausentismo {
+  /** Horas planificadas del período. */
+  horasTeoricas: number | null
+  horasPerdidas: number | null
+  grupos: AusentismoGrupo[]
+}
+
+/**
+ * Una incidencia o un seguimiento del mes (siempre a mano). Los dos llevan
+ * `evento` de título. La INCIDENCIA lleva qué pasó, cómo pasó y acción
+ * correctiva; el SEGUIMIENTO, solo un recuadro con `texto`.
+ */
+export interface Incidencia {
+  tipo: "INCIDENCIA" | "SEGUIMIENTO"
+  /** Solo SEGUIMIENTO. */
+  texto?: string
+  evento: string
+  quePaso: string
+  comoPaso: string
+  accionCorrectiva: string
+}
+
+export interface DatosMes {
+  /** Eficiencia de cada línea, %. Clave: número de línea ("1", "2", "3"). */
+  eficiencia: Record<string, number | null>
+  /** Clave: claveP() — "1|1000". */
+  presentaciones: Record<string, DatosPresentacion>
+  /** Rendimiento del semielaborado, %. Clave: nombre de la familia (familias_producto). */
+  semielaborado: Record<string, number | null>
+  /**
+   * Modo MANUAL: paradas que afectan a toda una línea (ej. suministro
+   * eléctrico), arriba de sus presentaciones como GENERALES. Clave: número de
+   * línea ("1", "2", "3"); cada línea la suya.
+   */
+  paradasGenerales?: Record<string, ParadaMes[]>
+  /** Siempre a mano, también en los meses automáticos. */
+  ausentismo?: Ausentismo | null
+  /** Siempre a mano, también en los meses automáticos. */
+  incidencias?: Incidencia[]
+  /** Total Aséptico cargado a mano (ej. julio y agosto, que vienen de otro Excel). Vacío = suma de las presentaciones. */
+  totalAseptico?: TotalAseptico | null
+  /** Título de esa pantalla, escrito por la analista ("INCIDENCIAS", "SEGUIMIENTO"…). Vacío = TITULO_INCIDENCIAS. */
+  tituloIncidencias?: string
+  /** "Días sin incidentes" de la pantalla de Incidencias, escrito por la analista. Vacío = no se muestra. */
+  diasSinIncidentes?: number | null
+  /** Pantalla VACÍO: siempre a mano, también en los meses automáticos. */
+  vacio?: DatosVacio | null
+}
+
+/** Una presentación de Vacío (AL-340, V-250…) en el mes: todo cargado a mano. */
+export interface DatosPresentacionVacio {
+  /** Cajas producidas (un total). */
+  cajas: number | null
+  /** Cajas planificadas (un total). */
+  cajasPlan: number | null
+  /** Merma de empaque, %. */
+  mermaEmpaque: number | null
+  /** Merma de semielaborado, %. */
+  mermaSemi: number | null
+  /** Paradas del mes: lista a mano, solo los nombres (como en las líneas en MANUAL). */
+  paradas: ParadaMes[]
+}
+
+/** Vacío en el mes. Una sola eficiencia para las dos presentaciones que se miren. */
+export interface DatosVacio {
+  eficiencia: number | null
+  /** Clave: el código de la presentación ("AL-340"). */
+  presentaciones: Record<string, DatosPresentacionVacio>
+}
+
+/** Días sin incidentes: menos de AMARILLO en rojo, desde AMARILLO en amarillo y desde VERDE en verde. */
+export const DIAS_SIN_INCIDENTES_AMARILLO = 15
+export const DIAS_SIN_INCIDENTES_VERDE = 30
+
+export interface TotalAseptico {
+  prod: number | null
+  plan: number | null
+  cumplimiento: number | null
+}
+
+export const TITULO_INCIDENCIAS = "INCIDENCIAS Y SEGUIMIENTO"
+
+/** Lo guardado de un mes (tabla indicadores_mes). */
+export interface RegistroMes {
+  /** 'YYYY-MM-01' */
+  mes: string
+  modo: ModoMes
+  /** Lo cargado a mano; null = nunca se cargó. */
+  datos: DatosMes | null
+  /** Clave: claveP() o claveSemi(). */
+  observaciones: Record<string, string>
+}
+
+/** Presentación dentro de una línea: "1|1000". */
+export const claveP = (linea: string, ml: string | number) => `${linea}|${ml}`
+/** Producto de semielaborado, para las observaciones: "semi|Selecto". */
+export const claveSemi = (familia: string) => `semi|${familia}`
+
+export const mesVacio = (): DatosMes => ({ eficiencia: {}, presentaciones: {}, semielaborado: {} })
+export const GRUPOS_AUSENTISMO = ["1", "2", "3"]
+export const ausentismoVacio = (): Ausentismo => ({
+  horasTeoricas: null,
+  horasPerdidas: null,
+  grupos: GRUPOS_AUSENTISMO.map((grupo) => ({ grupo, porcentaje: null, partePerdidas: null, quien: "", dias: null })),
+})
+export const incidenciaVacia = (): Incidencia => ({ tipo: "INCIDENCIA", evento: "", quePaso: "", comoPaso: "", accionCorrectiva: "" })
+export const presentacionVacia = (): DatosPresentacion => ({ corrio: false, prod: null, plan: null, merma: null, paradas: [] })

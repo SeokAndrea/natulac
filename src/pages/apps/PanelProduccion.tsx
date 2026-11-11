@@ -1,0 +1,290 @@
+import { useMemo, useState } from "react"
+import { Gauge, Loader2 } from "lucide-react"
+import { MarcoPanel } from "@/components/MarcoPanel"
+import { EmptyState } from "@/components/EmptyState"
+import { SeccionColapsable } from "@/components/SeccionColapsable"
+import { BannerSuperior } from "@/components/panel/BannerSuperior"
+import {
+  aplicarParadasEnVivo,
+  estadoDeLineas,
+  filasDeLineas,
+  totalesParadaPorLinea,
+  produccionPorLineaDe,
+  programacionDelDia,
+  textoUltimaActualizacion,
+  ultimaAccionDeTurno,
+} from "@/components/panel/calculosPanel"
+import { DetalleTurno } from "@/components/panel/DetalleTurno"
+import { ElegirTramoTurno } from "@/components/panel/ElegirTramoTurno"
+import { FiltrosPanel } from "@/components/panel/FiltrosPanel"
+import { TituloSeccion } from "@/components/panel/PanelCard"
+import { ParadaMasLarga } from "@/components/panel/ParadaMasLarga"
+import { ResumenPlanta } from "@/components/panel/resumen-planta/ResumenPlanta"
+import { SeccionLineas } from "@/components/panel/SeccionLineas"
+import { SeccionMermas } from "@/components/panel/SeccionMermas"
+import { SeccionTanques } from "@/components/panel/SeccionTanques"
+import { useEstimacionTanques } from "@/lib/robotTavil"
+import { usePanelTurno } from "@/components/panel/usePanelTurno"
+import { useAuth } from "@/lib/auth"
+import { useCatalogosLive } from "@/lib/catalogosLive"
+import { eficienciaDelTurno } from "@/lib/eficiencia"
+import { conEstadosDeLaBase, useEstadoLineas, useRecargarAlCambiar } from "@/lib/estadoLineas"
+import { minutosPorLinea } from "@/lib/paradas"
+import { useParadasAbiertas } from "@/lib/paradasEnVivo"
+import { puede } from "@/lib/permisos"
+import { horasTranscurridasTurno, mermaEnvasesTurno, mermaSemielaboradoTurno } from "@/lib/reportes"
+
+/*
+ * Panel de Producción: vista EN VIVO del turno en curso (banner de
+ * cabecera con hora/cajas/litros/meta/supervisor, y abajo tanques,
+ * líneas y merma del turno anterior) — con selector de fecha/turno
+ * para ver turnos anteriores.
+ *
+ * Esta página solo arma las piezas: los datos y el refresco en vivo
+ * salen de usePanelTurno(), cada sección vive en src/components/panel/
+ * y las cuentas en calculosPanel.ts. Utilidades CSS (panel-banner,
+ * panel-grid, shadow-panel, tank-glass, liquid-bubble, dot-ring,
+ * rise-in) viven al final de src/index.css.
+ */
+/** `enTv`: dentro del modo TV, sin encabezado ni menú (src/pages/apps/ModoTv.tsx). */
+export default function PanelProduccion({ enTv = false }: { enTv?: boolean } = {}) {
+  const { session } = useAuth()
+  /** Para el supervisor, tanques y líneas del panel llevan a Preparación (donde puede tocarlos). El jefe y la analista solo miran. */
+  const esSupervisor = session?.rol === "SUPERVISOR"
+  const { lineas, presentaciones, velocidades, cargando: cargandoCatalogos } = useCatalogosLive()
+  const [mostrarFiltros, setMostrarFiltros] = useState(false)
+  const {
+    turno,
+    tramos,
+    turnoAnterior,
+    cargando,
+    buscado,
+    enVivo,
+    fecha,
+    turnoTipo,
+    ahora,
+    puedeElegirArea,
+    areaFiltro,
+    areaEfectiva,
+    supervisorCargo,
+    servIndustriales,
+    planDia,
+    produccionDia,
+    paradasTurno,
+    paradasCompletas,
+    desdeTurno,
+    prep,
+    prod,
+    pt,
+    prepAnterior,
+    prodAnterior,
+    ptAnterior,
+    elegirArea,
+    elegirTurnoTipo,
+    elegirFecha,
+    verEnVivo,
+    elegirTramo,
+    refrescarEnVivo,
+  } = usePanelTurno()
+  // Paradas abiertas para las cintas en vivo. Aséptico y Pruebas ven lo suyo; el resto, producción.
+  const areaParadas = areaEfectiva === "ASEPTICO" || areaEfectiva === "PRUEBAS" ? areaEfectiva : null
+  // Quien puede, trae el Sheet de Mantenimiento solo cada 5 min (como el botón del Panel de Paradas).
+  const puedeSincronizarSheet = areaParadas !== "PRUEBAS" && (puede(session ?? null, "PARADAS_REGISTRAR") || session?.area === "MANTENIMIENTO")
+  const paradasAbiertas = useParadasAbiertas(areaParadas, puedeSincronizarSheet ? (session?.username ?? null) : null, enVivo)
+  // En vivo, el estado de cada línea lo dice la base (cada 15 s, el mismo que Líneas y el Panel de
+  // Paradas); si cambió algo, el Panel se refresca ya en vez de esperar sus 15 min.
+  const estadoBase = useEstadoLineas(areaParadas, enVivo)
+  useRecargarAlCambiar(enVivo ? estadoBase : null, refrescarEnVivo)
+
+  // ------------------------------------------------------------ cuentas
+  const horasTurnoActual = turno ? horasTranscurridasTurno(turno.horaInicio, turno.estado, turno.horaFin) : 0
+  // Meta y eficiencia con paradas (src/lib/eficiencia.ts): base = turno completo;
+  // la meta baja con las Programadas y el Ocioso; la eficiencia baja solo con las No programadas.
+  const eficiencia = turno
+    ? eficienciaDelTurno({
+        turnoTipo: turno.turnoTipo,
+        esquema: turno.esquema,
+        horaInicio: turno.horaInicio,
+        estado: turno.estado,
+        horasTranscurridas: horasTurnoActual,
+        corridas: prod.corridas,
+        productoTerminado: pt.registros,
+        presentaciones,
+        velocidades,
+        paradas: paradasTurno,
+        lineas: lineas.map((l) => l.codigo),
+        ahora,
+      })
+    : null
+  const meta = turno
+    ? {
+        pctCumplimiento: eficiencia?.total?.avancePct ?? null,
+        ritmoPct: eficiencia?.total?.eficienciaPct ?? null,
+        totalReales: eficiencia?.total?.realCajas ?? 0,
+        totalEsperadas: eficiencia?.total?.metaCajas ?? 0,
+      }
+    : null
+  const litrosProducidos = pt.registros.reduce((a, p) => a + p.litrosProducidos, 0)
+  // En vivo y sin turno ABIERTO (entre un turno y otro llega el último cerrado), las líneas no heredan
+  // el estado del turno cerrado: quedan Libres, salvo una parada abierta (igual que el Panel de Paradas).
+  const conCorridas = !enVivo || turno?.estado === "ABIERTO"
+  const lineasBase = turno ? estadoDeLineas(conCorridas ? prod.corridas : [], conCorridas ? prod.lineasEstado : [], lineas) : []
+  // En vivo: lo que dice la base; si no responde, el mismo cálculo de respaldo que Líneas y el Panel de Paradas.
+  const lineasEstado = enVivo
+    ? conEstadosDeLaBase(aplicarParadasEnVivo(lineasBase, paradasAbiertas, ahora, conCorridas ? desdeTurno : null), estadoBase, ahora, conCorridas ? desdeTurno : null)
+    : lineasBase
+  const produccionPorLinea = turno ? produccionPorLineaDe(pt.registros, lineas, presentaciones) : []
+  const cajasProducidasTotal = produccionPorLinea.reduce((a, l) => a + l.cajas, 0)
+  /*
+   * "Producción del turno": Cajas / Litros del banner son SIEMPRE del
+   * turno cargado — se mueven con lo que carga el supervisor activo. El
+   * acumulado de la jornada (los 3 turnos) solo lo usa el carrusel de
+   * Programación diaria, para cruzarlo contra el plan del día.
+   */
+  const usarDiario = enVivo && produccionDia.length > 0
+  const mermaEnvases = turno ? mermaEnvasesTurno(prod.contadores, pt.registros, presentaciones) : null
+  const mermaSemielaborado = turno
+    ? mermaSemielaboradoTurno(turno.id, prep.preparaciones, prod.corridas, pt.registros, prod.contadores, presentaciones, prep.transferencias, prep.desvases)
+    : null
+  // "Turno pasado": mismas funciones, mismo `presentaciones` ya cargado
+  // que el turno actual. Al correr en el render se recalculan solas
+  // cuando el catálogo termina de cargar.
+  const mermaEnvasesAnterior = turnoAnterior ? mermaEnvasesTurno(prodAnterior.contadores, ptAnterior.registros, presentaciones) : null
+  const mermaSemielaboradoAnterior = turnoAnterior
+    ? mermaSemielaboradoTurno(
+        turnoAnterior.id,
+        prepAnterior.preparaciones,
+        prodAnterior.corridas,
+        ptAnterior.registros,
+        prodAnterior.contadores,
+        presentaciones,
+        prepAnterior.transferencias,
+        prepAnterior.desvases,
+      )
+    : null
+  const programacionItems = useMemo(
+    () => programacionDelDia(planDia, produccionDia, usarDiario, pt.registros, presentaciones),
+    [pt.registros, presentaciones, planDia, produccionDia, usarDiario],
+  )
+  const filasLineas = filasDeLineas({
+    lineasEstado,
+    produccionPorLinea,
+    corridas: prod.corridas,
+    contadores: prod.contadores,
+    productoTerminado: pt.registros,
+    presentaciones,
+    eficiencia,
+    minutosParadaPorLinea: new Map(minutosPorLinea(paradasTurno, ahora).map((r) => [r.linea, r.minutos])),
+    minutosParadaTotalPorLinea: totalesParadaPorLinea(paradasTurno, paradasCompletas, ahora),
+    paradasTurno,
+    desdeTurno,
+    ahora,
+  })
+  // Robot Tavil: nivel estimado de los tanques, solo en vivo (el servidor ya filtra el switch y el turno abierto).
+  const estimaciones = useEstimacionTanques(session?.username, enVivo ? (turno?.id ?? null) : null)
+  const ultimaAccion = turno ? ultimaAccionDeTurno(prod.corridas, prep.tanques, prod.contadores, pt.registros, prep.preparaciones) : null
+
+  // ------------------------------------------------------------ pantalla
+  return (
+    <MarcoPanel enTv={enTv} title="Panel de Producción" description="Estado de la planta en vivo" fullWidth ocultarEstadoBanner sinMenuLateral>
+      <div className="flex flex-col gap-5">
+        <BannerSuperior
+          turno={turno}
+          buscado={buscado}
+          enVivo={enVivo}
+          fecha={fecha}
+          turnoTipo={turnoTipo}
+          textoUltimaActualizacion={textoUltimaActualizacion(ultimaAccion, ahora)}
+          puedeElegirArea={puedeElegirArea}
+          areaFiltro={areaFiltro}
+          supervisorCargo={supervisorCargo}
+          cajas={cajasProducidasTotal}
+          litros={litrosProducidos}
+          programacionItems={programacionItems}
+          meta={meta}
+          onAlternarFiltros={() => setMostrarFiltros((v) => !v)}
+          onAbrirFiltros={() => setMostrarFiltros(true)}
+        />
+
+        {mostrarFiltros && (
+          <FiltrosPanel
+            puedeElegirArea={puedeElegirArea}
+            areaFiltro={areaFiltro}
+            turnoTipo={turnoTipo}
+            fecha={fecha}
+            cargando={cargando}
+            onArea={elegirArea}
+            onTurnoTipo={elegirTurnoTipo}
+            onFecha={elegirFecha}
+            onEnVivo={verEnVivo}
+          />
+        )}
+
+        {!enVivo && <ElegirTramoTurno tramos={tramos} turnoId={turno?.id} onElegir={elegirTramo} />}
+
+        {cargando || cargandoCatalogos ? (
+          <div className="flex justify-center py-16 text-muted-foreground">
+            <Loader2 className="size-5 animate-spin" />
+          </div>
+        ) : !turno ? (
+          <EmptyState
+            icon={Gauge}
+            title={enVivo ? "Todavía no se registró ningún turno" : "No hay ningún turno para esa fecha/turno"}
+            description={
+              enVivo ? "En cuanto un supervisor inicie el primer turno, tanques y líneas van a aparecer acá." : "Prueba con otra fecha o tipo de turno."
+            }
+          />
+        ) : (
+          <>
+            {/* ------- TANQUES (angosta, izquierda, alta) · LÍNEAS + MERMAS/PARADAS (derecha) ------- */}
+            <div className="grid grid-cols-1 items-start gap-4 xl:grid-cols-12">
+              <div className="rise-in flex flex-col gap-4 xl:col-span-4">
+                <SeccionTanques
+                  tanques={prep.tanques}
+                  preparaciones={prep.preparaciones}
+                  servIndustriales={servIndustriales}
+                  ahora={ahora}
+                  conLinks={esSupervisor}
+                  estimaciones={estimaciones}
+                />
+                <ParadaMasLarga paradas={paradasTurno} completas={paradasCompletas} lineas={lineas} ahora={ahora} />
+              </div>
+
+              <div className="flex flex-col gap-4 xl:col-span-8">
+                <SeccionLineas filas={filasLineas} conLinks={esSupervisor} />
+                <SeccionMermas
+                  envasePasado={mermaEnvasesAnterior?.pct ?? null}
+                  envaseActual={mermaEnvases?.pct ?? null}
+                  semielaboradoPasado={mermaSemielaboradoAnterior?.pct ?? null}
+                  semielaboradoActual={mermaSemielaborado?.pct ?? null}
+                />
+              </div>
+            </div>
+
+            {/* En el modo TV no van los desplegables (no se abren): así lo de arriba entra más grande. */}
+            {!enTv && <DetalleTurno
+              turno={turno}
+              areaEfectiva={areaEfectiva}
+              eficiencia={eficiencia}
+              lineas={lineas}
+              paradas={paradasTurno}
+              preparaciones={prep.preparaciones}
+              corridas={prod.corridas}
+              productoTerminado={pt.registros}
+              contadores={prod.contadores}
+              transferencias={prep.transferencias}
+              desvases={prep.desvases}
+            />}
+          </>
+        )}
+
+        <div className={enTv ? "hidden" : "flex flex-col gap-3"}>
+          <TituloSeccion>Histórico</TituloSeccion>
+          <SeccionColapsable titulo="Resumen de Planta" descripcion="KPIs, matriz grupo × supervisor y tablas en un rango de fechas.">
+            <ResumenPlanta areaCodigo={areaEfectiva} />
+          </SeccionColapsable>
+        </div>
+      </div>
+    </MarcoPanel>
+  )
+}

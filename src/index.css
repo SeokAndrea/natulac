@@ -1,0 +1,626 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+@import "@fontsource/ibm-plex-sans/400.css";
+@import "@fontsource/ibm-plex-sans/500.css";
+@import "@fontsource/ibm-plex-sans/600.css";
+@import "@fontsource/ibm-plex-sans/700.css";
+@import "@fontsource/jetbrains-mono/500.css";
+@import "@fontsource/jetbrains-mono/600.css";
+@import "@fontsource/jetbrains-mono/700.css";
+
+@custom-variant dark (&:is(.dark *));
+
+/*
+ * Mapeo de tokens de shadcn/ui a utilidades de Tailwind (bg-primary,
+ * text-muted-foreground, etc). No es necesario tocar este bloque: solo
+ * expone las variables definidas en :root y .dark de más abajo.
+ */
+@theme inline {
+    --font-heading: var(--font-sans);
+    --font-sans: 'IBM Plex Sans', ui-sans-serif, system-ui, sans-serif;
+    --font-mono: 'JetBrains Mono', ui-monospace, monospace;
+    --color-sidebar-ring: var(--sidebar-ring);
+    --color-sidebar-border: var(--sidebar-border);
+    --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+    --color-sidebar-accent: var(--sidebar-accent);
+    --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+    --color-sidebar-primary: var(--sidebar-primary);
+    --color-sidebar-foreground: var(--sidebar-foreground);
+    --color-sidebar: var(--sidebar);
+    --color-chart-5: var(--chart-5);
+    --color-chart-4: var(--chart-4);
+    --color-chart-3: var(--chart-3);
+    --color-chart-2: var(--chart-2);
+    --color-chart-1: var(--chart-1);
+    --color-ring: var(--ring);
+    --color-input: var(--input);
+    --color-border: var(--border);
+    --color-destructive: var(--destructive);
+    --color-accent-foreground: var(--accent-foreground);
+    --color-accent: var(--accent);
+    --color-muted-foreground: var(--muted-foreground);
+    --color-muted: var(--muted);
+    --color-secondary-foreground: var(--secondary-foreground);
+    --color-secondary: var(--secondary);
+    --color-primary-foreground: var(--primary-foreground);
+    --color-primary: var(--primary);
+    --color-popover-foreground: var(--popover-foreground);
+    --color-popover: var(--popover);
+    --color-card-foreground: var(--card-foreground);
+    --color-card: var(--card);
+    --color-foreground: var(--foreground);
+    --color-background: var(--background);
+    --color-surface: var(--surface);
+    --color-success: var(--success);
+    --color-success-foreground: var(--success-foreground);
+    --color-success-soft: var(--success-soft);
+    --color-warning: var(--warning);
+    --color-warning-foreground: var(--warning-foreground);
+    --color-warning-soft: var(--warning-soft);
+    --color-danger: var(--danger);
+    --color-danger-foreground: var(--danger-foreground);
+    --color-danger-soft: var(--danger-soft);
+    --color-info: var(--info);
+    --color-info-foreground: var(--info-foreground);
+    --color-info-soft: var(--info-soft);
+    --color-vacio: var(--vacio);
+    --color-serie-mtto: var(--serie-mtto);
+    --color-serie-op: var(--serie-op);
+    --color-linea-1: var(--linea-1);
+    --color-linea-2: var(--linea-2);
+    --color-linea-3: var(--linea-3);
+    --color-marca: var(--marca);
+    --color-vacio-soft: var(--vacio-soft);
+    --color-flavor-orange: var(--flavor-orange);
+    --color-flavor-yellow: var(--flavor-yellow);
+    --color-flavor-red: var(--flavor-red);
+    --color-flavor-green: var(--flavor-green);
+    --color-flavor-lime: var(--flavor-lime);
+    --color-flavor-amber: var(--flavor-amber);
+    --radius-sm: calc(var(--radius) * 0.6);
+    --radius-md: calc(var(--radius) * 0.8);
+    --radius-lg: var(--radius);
+    --radius-xl: calc(var(--radius) * 1.4);
+    --radius-2xl: calc(var(--radius) * 1.8);
+    --radius-3xl: calc(var(--radius) * 2.2);
+    --radius-4xl: calc(var(--radius) * 2.6);
+}
+
+/*
+ * PALETA DE MARCA — modo claro. Adoptada tal cual del dashboard de
+ * referencia (armado en Lovable) — decisión explícita del usuario de reemplazar
+ * la paleta anterior de Natulac por esta. Formato oklch(luminosidad
+ * croma tono).
+ *
+ * Suma tokens de ESTADO que la paleta anterior no tenía:
+ * success/warning/danger (con su versión "-foreground" para texto
+ * legible encima, y "-soft" para fondos suaves de alerta) y
+ * flavor-orange/yellow/red/green para colorear tanques por sabor.
+ * "surface" es el fondo del header (un poco distinto de
+ * "background" para dar profundidad sutil).
+ */
+:root {
+    --radius: 0.25rem;
+    --background: oklch(0.958 0.005 247.858);
+    --surface: oklch(0.988 0.002 247.858);
+    --success: oklch(0.63 0.16 156);
+    --success-foreground: oklch(0.38 0.11 156);
+    --success-soft: oklch(0.94 0.05 156);
+    --warning: oklch(0.76 0.15 74);
+    --warning-foreground: oklch(0.4 0.1 66);
+    --warning-soft: oklch(0.95 0.06 84);
+    --danger: oklch(0.56 0.21 22);
+    --danger-foreground: oklch(0.42 0.17 24);
+    --danger-soft: oklch(0.94 0.05 22);
+    --info: oklch(0.55 0.16 245);
+    /* Series de gráficas: Mantenimiento / Operacional (Panel de Paradas). Validadas con dataviz (claro y oscuro). */
+    --serie-mtto: #1d73c5;
+    --serie-op: #0e8a7a;
+    /* Una por línea (Panel de Paradas), fija: el color sigue a la línea. Verde, azul y naranja vivo;
+       el verde más claro que el naranja para que se distingan también con daltonismo. Validadas con dataviz. */
+    --linea-1: #7cbf45;
+    --linea-2: #3b5bdb;
+    --linea-3: #d4673f;
+    /* El azul marino del logo de texto «Natulac» (igual en claro y oscuro). */
+    --marca: #1e2163;
+    --info-foreground: oklch(0.46 0.15 245);
+    --info-soft: oklch(0.94 0.04 245);
+    /* Vacío (latas): tanques de Aséptico con producto de Vacío y el Modo Vacío de Preparación. */
+    --vacio: oklch(0.45 0.13 268);
+    --vacio-soft: oklch(0.94 0.03 268);
+    --flavor-orange: oklch(0.72 0.18 55);
+    --flavor-yellow: oklch(0.84 0.16 92);
+    --flavor-red: oklch(0.58 0.22 26);
+    --flavor-green: oklch(0.68 0.16 148);
+    --flavor-lime: oklch(0.8 0.17 125);
+    --flavor-amber: oklch(0.77 0.17 70);
+    --foreground: oklch(0.129 0.042 264.695);
+    --card: oklch(1 0 0);
+    --card-foreground: oklch(0.129 0.042 264.695);
+    --popover: oklch(1 0 0);
+    --popover-foreground: oklch(0.129 0.042 264.695);
+    --primary: oklch(0.208 0.042 265.755);
+    --primary-foreground: oklch(0.984 0.003 247.858);
+    --secondary: oklch(0.968 0.007 247.896);
+    --secondary-foreground: oklch(0.208 0.042 265.755);
+    --muted: oklch(0.968 0.007 247.896);
+    --muted-foreground: oklch(0.34 0.035 257.4);
+    --accent: oklch(0.968 0.007 247.896);
+    --accent-foreground: oklch(0.208 0.042 265.755);
+    --destructive: oklch(0.54 0.23 27.3);
+    --border: oklch(0.88 0.016 255.5);
+    --input: oklch(0.86 0.018 255.5);
+    --ring: oklch(0.704 0.04 256.788);
+    --chart-1: oklch(0.646 0.222 41.116);
+    --chart-2: oklch(0.6 0.118 184.704);
+    --chart-3: oklch(0.398 0.07 227.392);
+    --chart-4: oklch(0.828 0.189 84.429);
+    --chart-5: oklch(0.769 0.188 70.08);
+    --sidebar: oklch(0.984 0.003 247.858);
+    --sidebar-foreground: oklch(0.129 0.042 264.695);
+    --sidebar-primary: oklch(0.208 0.042 265.755);
+    --sidebar-primary-foreground: oklch(0.984 0.003 247.858);
+    --sidebar-accent: oklch(0.968 0.007 247.896);
+    --sidebar-accent-foreground: oklch(0.208 0.042 265.755);
+    --sidebar-border: oklch(0.929 0.013 255.508);
+    --sidebar-ring: oklch(0.704 0.04 256.788);
+}
+
+/* PALETA DE MARCA — modo oscuro. Misma fuente que :root. */
+.dark {
+    /* Las listas nativas (<select>, hora) en oscuro: sin esto salen en blanco con letra clara. */
+    color-scheme: dark;
+    --background: oklch(0.14 0.018 258);
+    --surface: oklch(0.2 0.02 258);
+    --success: oklch(0.7 0.15 156);
+    --success-foreground: oklch(0.9 0.09 156);
+    --success-soft: oklch(0.32 0.06 156);
+    --warning: oklch(0.8 0.15 80);
+    --warning-foreground: oklch(0.92 0.1 84);
+    --warning-soft: oklch(0.34 0.07 80);
+    --danger: oklch(0.68 0.19 24);
+    --danger-foreground: oklch(0.9 0.08 24);
+    --danger-soft: oklch(0.34 0.09 24);
+    --info: oklch(0.72 0.14 245);
+    --serie-mtto: #4a84d6;
+    --serie-op: #14947f;
+    --linea-1: #76b941;
+    --linea-2: #6f82ee;
+    --linea-3: #cf6239;
+    --marca: #1e2163;
+    --info-foreground: oklch(0.86 0.08 245);
+    --info-soft: oklch(0.32 0.07 245);
+    --vacio: oklch(0.74 0.11 268);
+    --vacio-soft: oklch(0.27 0.05 268);
+    --flavor-orange: oklch(0.75 0.18 55);
+    --flavor-yellow: oklch(0.86 0.16 92);
+    --flavor-red: oklch(0.63 0.22 26);
+    --flavor-green: oklch(0.72 0.16 148);
+    --flavor-lime: oklch(0.82 0.17 125);
+    --flavor-amber: oklch(0.79 0.17 70);
+    --foreground: oklch(0.98 0.003 247.858);
+    --card: oklch(0.235 0.022 258);
+    --card-foreground: oklch(0.984 0.003 247.858);
+    --popover: oklch(0.235 0.022 258);
+    --popover-foreground: oklch(0.984 0.003 247.858);
+    --primary: oklch(0.929 0.013 255.508);
+    --primary-foreground: oklch(0.208 0.042 265.755);
+    --secondary: oklch(0.32 0.035 260);
+    --secondary-foreground: oklch(0.984 0.003 247.858);
+    --muted: oklch(0.32 0.035 260);
+    --muted-foreground: oklch(0.81 0.03 257);
+    --accent: oklch(0.32 0.035 260);
+    --accent-foreground: oklch(0.984 0.003 247.858);
+    --destructive: oklch(0.704 0.191 22.216);
+    --border: oklch(1 0 0 / 20%);
+    --input: oklch(1 0 0 / 26%);
+    --ring: oklch(0.551 0.027 264.364);
+    --chart-1: oklch(0.488 0.243 264.376);
+    --chart-2: oklch(0.696 0.17 162.48);
+    --chart-3: oklch(0.769 0.188 70.08);
+    --chart-4: oklch(0.627 0.265 303.9);
+    --chart-5: oklch(0.645 0.246 16.439);
+    --sidebar: oklch(0.18 0.024 262);
+    --sidebar-foreground: oklch(0.984 0.003 247.858);
+    --sidebar-primary: oklch(0.488 0.243 264.376);
+    --sidebar-primary-foreground: oklch(0.984 0.003 247.858);
+    --sidebar-accent: oklch(0.32 0.035 260);
+    --sidebar-accent-foreground: oklch(0.984 0.003 247.858);
+    --sidebar-border: oklch(1 0 0 / 16%);
+    --sidebar-ring: oklch(0.551 0.027 264.364);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+    }
+  body {
+    @apply bg-background text-foreground;
+    }
+  /* Las listas desplegables nativas toman el fondo del tema: en oscuro el select es translúcido y la lista salía blanca con letra clara. */
+  select option,
+  select optgroup {
+    background-color: var(--popover);
+    color: var(--popover-foreground);
+    }
+  button:not(:disabled), [role="button"]:not(:disabled) {
+    cursor: pointer;
+    }
+  html {
+    @apply font-sans;
+    }
+  /* Casillas y opciones nativas: con el dedo, de 13 a 24 px (las de la app ya amplían su área de toque). */
+  @media (pointer: coarse) {
+    input:is([type="checkbox"], [type="radio"]):not(.sr-only) {
+      width: 1.5rem;
+      height: 1.5rem;
+      }
+    }
+  /* Títulos repartidos parejo; párrafos sin una palabra sola en la última línea. */
+  h1, h2, h3 {
+    text-wrap: balance;
+    }
+  p {
+    text-wrap: pretty;
+    }
+}
+
+/*
+ * Utilidades del dashboard (ver src/pages/apps/MisEstadisticas.tsx):
+ * "num" para números tabulares en fuente mono (alineados en tablas),
+ * "liquid-wave"/"liquid-wave-2"/"alert-pulse" para las animaciones de
+ * nivel de tanque (dos capas de ola superpuestas) y estados críticos
+ * — tomadas/extendidas del dashboard de referencia.
+ */
+@utility num {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+}
+
+@utility liquid-wave {
+  animation: liquid-wave 5s ease-in-out infinite;
+}
+
+@keyframes liquid-wave {
+  0%, 100% {
+    transform: translateX(-25%) scaleY(1);
+  }
+  50% {
+    transform: translateX(0%) scaleY(1.35);
+  }
+}
+
+/* Segunda capa de ola, más lenta y en reversa, para que el líquido se
+   vea con dos crestas superpuestas en vez de una sola (más orgánico). */
+@utility liquid-wave-2 {
+  animation: liquid-wave-2 7s ease-in-out infinite reverse;
+}
+
+@keyframes liquid-wave-2 {
+  0%, 100% {
+    transform: translateX(15%) scaleY(1);
+  }
+  50% {
+    transform: translateX(-20%) scaleY(1.5);
+  }
+}
+
+@utility alert-pulse {
+  animation: alert-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes alert-pulse {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+/* Cinta transportadora del Panel de Paradas (línea corriendo): cajas
+   viajando de un extremo al otro, en loop. Ver src/components/CintaLinea.tsx. */
+@utility belt-box {
+  animation: belt-move 4.8s linear infinite;
+}
+
+@keyframes belt-move {
+  from {
+    transform: translateX(-120%);
+  }
+  to {
+    transform: translateX(820%);
+  }
+}
+
+/* Banner del Panel de Producción: superficie industrial con degradado
+   sutil + rejilla técnica encima. */
+@utility panel-banner {
+  background-image:
+    linear-gradient(135deg, color-mix(in oklab, var(--primary) 14%, var(--surface)) 0%, var(--surface) 55%, color-mix(in oklab, var(--success) 10%, var(--surface)) 100%);
+}
+
+@utility panel-grid {
+  background-image:
+    linear-gradient(to right, color-mix(in oklab, var(--border) 70%, transparent) 1px, transparent 1px),
+    linear-gradient(to bottom, color-mix(in oklab, var(--border) 70%, transparent) 1px, transparent 1px);
+  background-size: 28px 28px;
+}
+
+/* Sombra "elevada" reutilizable para las tarjetas del panel. */
+@utility shadow-panel {
+  box-shadow:
+    0 1px 0 0 color-mix(in oklab, var(--border) 80%, transparent),
+    0 12px 28px -18px color-mix(in oklab, var(--foreground) 35%, transparent);
+}
+
+/* Brillo/reflejo vertical sobre el vidrio del tanque. */
+@utility tank-glass {
+  background-image: linear-gradient(
+    100deg,
+    color-mix(in oklab, var(--foreground) 6%, transparent) 0%,
+    transparent 32%,
+    color-mix(in oklab, var(--background) 55%, transparent) 46%,
+    transparent 60%
+  );
+}
+
+/* Modo oscuro: el brillo del vidrio se armaba con el color de fondo, que en
+   oscuro es casi negro y dejaba una franja negra sobre el líquido. Acá el
+   brillo es blanco suave y el borde, una sombra leve. */
+.dark .tank-glass {
+  background-image: linear-gradient(
+    100deg,
+    color-mix(in oklab, black 22%, transparent) 0%,
+    transparent 32%,
+    color-mix(in oklab, white 14%, transparent) 46%,
+    transparent 60%
+  );
+}
+
+/* Burbujeo lento del líquido. */
+@utility liquid-bubble {
+  animation: liquid-bubble 4.5s ease-in-out infinite;
+}
+
+@keyframes liquid-bubble {
+  0% {
+    transform: translateY(0) scale(0.9);
+    opacity: 0;
+  }
+  25% {
+    opacity: 0.8;
+  }
+  100% {
+    transform: translateY(-140%) scale(1.15);
+    opacity: 0;
+  }
+}
+
+/* Fila compacta de "Líneas activas" en el Panel de Producción: línea + 4 métricas alineadas a la derecha. */
+@utility linea-fila-grid {
+  display: grid;
+  grid-template-columns: minmax(15rem, 2.6fr) repeat(5, minmax(4.5rem, 1fr));
+  align-items: center;
+  column-gap: 0.75rem;
+}
+
+/* Halo pulsante para el punto de línea activa. */
+@utility dot-ring {
+  animation: dot-ring 1.8s ease-out infinite;
+}
+
+@keyframes dot-ring {
+  0% {
+    transform: scale(0.6);
+    opacity: 0.7;
+  }
+  100% {
+    transform: scale(2.6);
+    opacity: 0;
+  }
+}
+
+/* Entrada suave de las tarjetas del panel. */
+@utility rise-in {
+  animation: rise-in 0.45s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes rise-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* Cada slide del carrusel del banner (Programación) entra con un fade + micro-slide al rotar. */
+@utility carrusel-slide {
+  animation: carrusel-slide 0.35s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes carrusel-slide {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* Remolino de "En Preparación" — anillo cónico girando (tomado del dashboard de referencia, ver TanqueVisual.tsx). */
+@utility mixing-vortex {
+  animation: mixing-vortex 2.4s linear infinite;
+  background: conic-gradient(from 20deg, transparent 0 16%, var(--warning) 18% 31%, transparent 34% 52%, var(--warning) 55% 68%, transparent 72%);
+}
+
+@keyframes mixing-vortex {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Llenado del tanque (sensor/PLC) — ver "llenado" en src/components/TanqueVisual.tsx.
+   fill-stream: el chorro que baja. fill-splash: la salpicadura en la superficie.
+   fill-rise: rayitas que suben en lo que va entrando. */
+@utility fill-stream {
+  animation: fill-stream 0.6s linear infinite;
+}
+
+@keyframes fill-stream {
+  from {
+    background-position-y: 0;
+  }
+  to {
+    background-position-y: 10px;
+  }
+}
+
+@utility fill-splash {
+  animation: fill-splash 0.9s ease-out infinite;
+}
+
+@keyframes fill-splash {
+  0% {
+    transform: scale(0.4);
+    opacity: 0.9;
+  }
+  100% {
+    transform: scale(1.6);
+    opacity: 0;
+  }
+}
+
+@utility fill-rise {
+  animation: fill-rise 1.2s linear infinite;
+}
+
+@keyframes fill-rise {
+  from {
+    background-position-y: 0;
+  }
+  to {
+    background-position-y: -8px;
+  }
+}
+
+/* Transferencia entre tanques: el líquido corriendo por la tubería
+   (ver src/components/TransferenciaTanques.tsx). */
+@utility pipe-flow {
+  animation: pipe-flow 0.8s linear infinite;
+}
+
+@keyframes pipe-flow {
+  from {
+    background-position-x: 0;
+  }
+  to {
+    background-position-x: 16px;
+  }
+}
+
+/* CIP del tanque: la bola de spray girando (ver src/components/TanqueVisual.tsx). */
+@utility cip-spin {
+  animation: cip-spin 1.2s linear infinite;
+}
+
+@keyframes cip-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/*
+ * Texto que no entra en su renglón (descripción de una parada en los
+ * paneles): va y vuelve despacio, con una pausa en cada punta. Lo arma
+ * src/components/TextoDesplazable.tsx, que pone --desplazar (cuánto falta
+ * ver) y --duracion solo si el texto no entra.
+ */
+@utility texto-desplazable {
+  animation: texto-desplazable var(--duracion, 8s) ease-in-out infinite alternate;
+}
+
+@keyframes texto-desplazable {
+  0%,
+  15% {
+    transform: translateX(0);
+  }
+  85%,
+  100% {
+    transform: translateX(var(--desplazar, 0));
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* Sin movimiento: el texto entero, en dos renglones. */
+  .texto-desplazable-caja {
+    white-space: normal;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+  }
+  .texto-desplazable {
+    animation: none;
+  }
+  .rise-in,
+  .liquid-bubble,
+  .dot-ring,
+  .liquid-wave,
+  .liquid-wave-2,
+  .alert-pulse,
+  .mixing-vortex,
+  .carrusel-slide,
+  .fill-stream,
+  .fill-splash,
+  .fill-rise,
+  .pipe-flow,
+  .cip-spin,
+  .belt-box {
+    animation: none;
+  }
+}
+
+/*
+ * INDICADORES: color de cada línea y de cada familia de producto
+ * (prototipo aprobado 2026-10-14). Las familias llevan el color de su
+ * envase, como en src/components/pixel/familias.ts. "-texto" es el tono
+ * legible sobre fondo claro/oscuro; "-cab", la letra sobre la cabecera
+ * rellena. Se usan desde src/components/indicadores/colores.ts.
+ */
+:root {
+  --ind-mezcla: #0a1a3a;
+  --ind-l1: #2a78d6; --ind-l1-texto: #1d62b4; --ind-l1-cab: #ffffff;
+  /* Línea 2 en «naranja» (ni chillón ni marrón). Antes morado #7553d1. */
+  --ind-l2: #d97757; --ind-l2-texto: #c15f3c; --ind-l2-cab: #ffffff; --ind-l2-mezcla: #a3360f;
+  --ind-l3: #1baf7a; --ind-l3-texto: #11865c; --ind-l3-cab: #ffffff;
+  /* Vacío: violeta. */
+  --ind-vacio: #7a4fc4; --ind-vacio-texto: #6034a8; --ind-vacio-cab: #ffffff;
+  --ind-clasicos: #2d3b8f; --ind-clasicos-texto: #2d3b8f; --ind-clasicos-cab: #ffffff;
+  /* Selecto un poco más oscuro que su envase, sin parecerse al Clásico. */
+  --ind-selecto: #6fa8d8; --ind-selecto-texto: #2f6ea3; --ind-selecto-cab: #1b2260;
+  --ind-jucosa: #b9d44a; --ind-jucosa-texto: #4f6b12; --ind-jucosa-cab: #2e4a1a;
+  --ind-premium: #1f2a5c; --ind-premium-texto: #1f2a5c; --ind-premium-cab: #e8e4d0;
+  --ind-especiales: #1f1f1f; --ind-especiales-texto: #1f1f1f; --ind-especiales-cab: #ffffff;
+  /* Grupos de trabajo (Ausentismo). */
+  --ind-g1: #0f8b8d; --ind-g2: #c8435a; --ind-g3: #d48a12;
+}
+.dark {
+  --ind-mezcla: #ffffff;
+  --ind-l1: #3987e5; --ind-l1-texto: #74abef; --ind-l1-cab: #0b1220;
+  --ind-l2: #e08a6c; --ind-l2-texto: #eb9a7c; --ind-l2-cab: #0b1220; --ind-l2-mezcla: #ffffff;
+  --ind-l3: #199e70; --ind-l3-texto: #2cc28c; --ind-l3-cab: #0b1220;
+  --ind-vacio: #8e69d6; --ind-vacio-texto: #b59cea; --ind-vacio-cab: #0b1220;
+  --ind-clasicos: #7d8ce0; --ind-clasicos-texto: #9aa6ec; --ind-clasicos-cab: #0b1220;
+  --ind-selecto: #a9cdea; --ind-selecto-texto: #a9cdea; --ind-selecto-cab: #0b1220;
+  --ind-jucosa-texto: #b9d44a; --ind-jucosa-cab: #0b1220;
+  --ind-premium: #5d6bb0; --ind-premium-texto: #aab4e4;
+  --ind-especiales: #d9d9d9; --ind-especiales-texto: #d9d9d9; --ind-especiales-cab: #0b1220;
+  --ind-g1: #2bb3b5; --ind-g2: #e8697e; --ind-g3: #eaa83a;
+}

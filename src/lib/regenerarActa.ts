@@ -1,0 +1,62 @@
+import type { Session } from "@/lib/auth"
+import type { AreaEstructura } from "@/lib/estructura"
+import type { LineaLive, PresentacionLive, VelocidadLive } from "@/lib/catalogosLive"
+import { finDelTurno, generarActaPdf } from "@/lib/actaPdf"
+import { miTurnoDetalle, subirYRegistrarActa } from "@/lib/historialTurnos"
+import { listarLecturasServiciosIndustrialesDeTurno } from "@/lib/panelProduccion"
+import { cargarParadasDelTurno } from "@/lib/paradasCatalogo"
+import { actualizarSheetEnSilencio } from "@/lib/sheetMantenimiento"
+
+/**
+ * Arma el acta de un turno propio ya cerrado con los datos de ahora y la
+ * guarda como versión nueva (la anterior queda anulada; ver registrar_acta).
+ * La usan las actas pendientes del cierre automático y la carga tarde de
+ * contador/PT (migración 20261107). Solo el responsable del turno puede
+ * leer su detalle (mi_turno_detalle).
+ */
+export async function regenerarActaDeMiTurno(
+  session: Session,
+  turnoId: string,
+  catalogos: { areas?: AreaEstructura[]; lineas: LineaLive[]; presentaciones: PresentacionLive[]; velocidades: VelocidadLive[] },
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  const turno = await miTurnoDetalle(session.username, turnoId)
+  if (!turno) return { ok: false, error: "No se pudo leer el turno para armar el acta." }
+  try {
+    // Las paradas de Mantenimiento entran desde su Sheet: se traen antes de armar el acta.
+    await actualizarSheetEnSilencio(session.username, session.area)
+    const [serviciosIndustriales, paradas] = await Promise.all([
+      listarLecturasServiciosIndustrialesDeTurno(turnoId),
+      cargarParadasDelTurno(turnoId),
+    ])
+    const blob = await generarActaPdf({
+      codigo: turno.codigo,
+      fecha: turno.fecha,
+      turnoTipo: turno.turnoTipo,
+      grupo: turno.grupo,
+      tanquesEncontrados: turno.tanquesEncontrados,
+      tanques: turno.tanques,
+      preparaciones: turno.preparaciones,
+      corridas: turno.corridas,
+      contadores: turno.contadores,
+      productoTerminado: turno.productoTerminado,
+      novedades: turno.novedades,
+      ajustesVolumen: turno.ajustesVolumen,
+      transferencias: turno.transferencias,
+      salidasVacio: turno.salidasVacio,
+      paradas,
+      finTurno: finDelTurno(turno),
+      serviciosIndustriales,
+      responsables: turno.responsables,
+      esquema: turno.esquema,
+      horaInicio: turno.horaInicio,
+      correcciones: turno.correcciones,
+      supervisorNombre: turno.supervisorNombre || session.nombre || session.username,
+      area: session.area,
+      ...catalogos,
+    })
+    const r = await subirYRegistrarActa(session.username, turnoId, session.area ?? "SIN_AREA", turno.codigo, blob)
+    return r.ok ? { ok: true } : { ok: false, error: r.error }
+  } catch {
+    return { ok: false, error: "No se pudo generar el PDF del acta." }
+  }
+}

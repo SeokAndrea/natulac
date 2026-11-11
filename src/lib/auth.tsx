@@ -1,0 +1,365 @@
+import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react"
+import type { AreaCodigo, RolCodigo } from "@/lib/catalogos"
+import { listarEstructura, type Nivel } from "@/lib/estructura"
+import { cedulaValida, claveCumplePolitica } from "@/lib/credenciales"
+import type { Permiso } from "@/lib/permisos"
+import { esSoloLectura } from "@/lib/rolVista"
+import { fijarSoloLectura } from "@/lib/soloLectura"
+import { alVencerSesion, fijarTokenSesion, limpiarAvisoSalida, tokenSesion } from "@/lib/sesionToken"
+import { cerrarSesionEnBase, supabase } from "@/lib/supabase"
+
+/** Permisos efectivos (rol + extras). null = no se pudieron consultar (se conserva lo que había). */
+async function cargarPermisos(usuario: string): Promise<Permiso[] | null> {
+  const { data, error } = await supabase.rpc("permisos_de", { p_usuario: usuario })
+  if (error || !Array.isArray(data)) return null
+  return data as Permiso[]
+}
+
+interface PerfilActual {
+  activo: boolean
+  rol: RolCodigo
+  area: AreaCodigo | null
+  esDueno: boolean
+  permisos: Permiso[]
+  puestoId: string | null
+  puestoCodigo: string | null
+  puesto: string | null
+  nivel: Nivel | null
+  titulo: string | null
+}
+
+/**
+ * Rol, área, usuario maestro y permisos ACTUALES (ver perfil_sesion, migración
+ * 20261084): la sesión se guarda en el navegador desde el login, así que un
+ * cambio de rol o una baja no se notaban hasta volver a entrar.
+ * null = la persona ya no existe; undefined = no se pudo consultar.
+ */
+async function cargarPerfil(usuario: string): Promise<PerfilActual | null | undefined> {
+  const { data, error } = await supabase.rpc("perfil_sesion", { p_usuario: usuario })
+  if (error) return undefined
+  if (!data) return null
+  const f = data as { activo: boolean; rol: string; area: string | null; es_dueno: boolean; puesto_id?: string | null; puesto_codigo?: string | null; puesto?: string | null; nivel?: number | null; titulo?: string | null; permisos: string[] | null }
+  return {
+    activo: Boolean(f.activo),
+    rol: f.rol as RolCodigo,
+    area: f.area as AreaCodigo | null,
+    esDueno: Boolean(f.es_dueno),
+    permisos: (f.permisos ?? []) as Permiso[],
+    puestoId: f.puesto_id ?? null,
+    puestoCodigo: f.puesto_codigo ?? null,
+    puesto: f.puesto ?? null,
+    nivel: (f.nivel ?? null) as Nivel | null,
+    titulo: f.titulo ?? null,
+  }
+}
+
+export interface Session {
+  username: string
+  nombre: string
+  cedula: string | null
+  /** null = todas las áreas (solo aplica a SuperAdministrador). */
+  area: AreaCodigo | null
+  rol: RolCodigo
+  /** Usuario maestro (en el código, «dueño»): por encima de Super Administrador (intocable, gestiona Super Admins, ve Errores y ajustes). Flag aparte del rol, columna usuarios.ve_errores — ver migración 20261079090000_dueno.sql. */
+  esDueno: boolean
+  /** Permisos efectivos (rol + extras). Se refrescan al abrir la app. Ver src/lib/permisos.ts. */
+  permisos: Permiso[]
+  /**
+   * true = la persona todavía no pasó el primer ingreso: tiene que
+   * confirmar Nombre y Apellido + Cédula y definir una clave propia de
+   * 4 dígitos (no 1234) antes de usar la app. También se prende si la
+   * clave escrita no cumple la política. Ver App.tsx y PrimerIngreso.tsx.
+   */
+  debeCompletarPerfil: boolean
+  /** Puesto, nivel y título de la persona. Los permisos salen del puesto; esto es para mostrar. Llegan con perfil_sesion al abrir la app. */
+  puestoId?: string | null
+  /** Código del puesto (ej. SOLO_VISTA): decide Solo Vista (ver rolVista.ts). */
+  puestoCodigo?: string | null
+  puesto?: string | null
+  nivel?: Nivel | null
+  titulo?: string | null
+  /** Credencial que entregó verificar_login; va en cada petición (ver sesionToken.ts). Las sesiones de antes no la traen. */
+  token?: string | null
+}
+
+export interface DatosPrimerIngreso {
+  passwordNueva: string
+  nombre: string
+  cedula: string
+}
+
+/** «Ver como» un puesto (solo el usuario maestro): la app se muestra con los permisos y el área de ese puesto. Lo que se hace sigue con el usuario real. */
+export interface VistaComo {
+  puestoId: string
+  /** Código del puesto: con SOLO_VISTA la vista queda de solo lectura, como la persona real. Las vistas guardadas de antes no lo traen. */
+  puestoCodigo?: string
+  rol: RolCodigo
+  area: AreaCodigo | null
+  permisos: Permiso[]
+  /** Para mostrar en la franja. */
+  puesto?: string
+  nivel?: Nivel | null
+}
+
+interface AuthContextValue {
+  /** La sesión con la que se muestra la app (la de «Ver como» si el usuario maestro eligió una). */
+  session: Session | null
+  /** La sesión de verdad (sin «Ver como»). */
+  sessionReal: Session | null
+  vistaComo: VistaComo | null
+  /** null = volver a la vista propia. */
+  verComo: (puestoId: string | null) => Promise<{ ok: true } | { ok: false; error: string }>
+  login: (username: string, password: string) => Promise<{ ok: true } | { ok: false; error: string }>
+  completarPrimerIngreso: (datos: DatosPrimerIngreso) => Promise<{ ok: true } | { ok: false; error: string }>
+  logout: () => void
+}
+
+const STORAGE_KEY = "natulac.session"
+const STORAGE_VISTA = "natulac.verComo"
+
+const AuthContext = createContext<AuthContextValue | null>(null)
+
+export function AuthProvider({ children }: { children: ReactNode }) {
+  const [session, setSession] = useState<Session | null>(() => {
+    const raw = localStorage.getItem(STORAGE_KEY)
+    if (!raw) return null
+    try {
+      // Sesiones guardadas antes del rework traían veErrores en vez de esDueno.
+      const guardada = JSON.parse(raw) as Session & { veErrores?: boolean }
+      // Acá y no en un efecto: las pantallas piden datos antes de que corran los efectos de este provider.
+      fijarTokenSesion(guardada.token ?? null)
+      return { ...guardada, esDueno: guardada.esDueno ?? guardada.veErrores ?? false, permisos: guardada.permisos ?? [] }
+    } catch {
+      return null
+    }
+  })
+  /*
+   * La contraseña recién escrita en el login, solo en memoria (NUNCA
+   * en localStorage). completar_primer_ingreso() la necesita como
+   * "contraseña actual". Si la persona recarga la página en medio del
+   * primer ingreso, se pierde y hay que iniciar sesión de nuevo.
+   */
+  const [passwordLogin, setPasswordLogin] = useState<string | null>(null)
+  const [vistaComo, setVistaComo] = useState<VistaComo | null>(() => {
+    try {
+      const raw = localStorage.getItem(STORAGE_VISTA)
+      const guardada = raw ? (JSON.parse(raw) as Partial<VistaComo>) : null
+      // Una vista guardada por rol (antes de los puestos) ya no sirve.
+      return guardada?.puestoId ? (guardada as VistaComo) : null
+    } catch {
+      return null
+    }
+  })
+
+  useEffect(() => {
+    if (vistaComo) localStorage.setItem(STORAGE_VISTA, JSON.stringify(vistaComo))
+    else localStorage.removeItem(STORAGE_VISTA)
+  }, [vistaComo])
+
+  async function verComo(puestoId: string | null) {
+    if (puestoId === null) {
+      setVistaComo(null)
+      return { ok: true as const }
+    }
+    if (!session?.esDueno) return { ok: false as const, error: "Solo el usuario maestro puede usar «Ver como»." }
+    const estructura = await listarEstructura(session.username)
+    const puesto = estructura?.puestos.find((p) => p.id === puestoId)
+    if (!puesto) return { ok: false as const, error: "No se encontró ese puesto." }
+    const { data, error } = await supabase.rpc("permisos_de_puesto", { p_usuario: session.username, p_puesto_id: puestoId })
+    if (error || !Array.isArray(data)) return { ok: false as const, error: error?.message || "No se pudieron leer los permisos de ese puesto." }
+    setVistaComo({
+      puestoId,
+      puestoCodigo: puesto.codigo,
+      rol: puesto.rolEquivalente ?? "SUPERVISOR",
+      area: puesto.areaCodigo,
+      permisos: data as Permiso[],
+      puesto: puesto.nombre,
+      nivel: puesto.nivel,
+    })
+    return { ok: true as const }
+  }
+
+  // Solo el usuario maestro puede tener «Ver como»; si deja de serlo, no se aplica.
+  const vistaActiva = session?.esDueno ? vistaComo : null
+  const sessionVista = useMemo<Session | null>(
+    () =>
+      session && vistaActiva
+        ? { ...session, rol: vistaActiva.rol, permisos: vistaActiva.permisos, esDueno: false, area: vistaActiva.area, puestoId: vistaActiva.puestoId, puestoCodigo: vistaActiva.puestoCodigo ?? null, puesto: vistaActiva.puesto ?? null, nivel: vistaActiva.nivel ?? null, titulo: null }
+        : session,
+    [session, vistaActiva],
+  )
+  // En el render y no en un efecto: los efectos de las pantallas (que ya piden datos) corren antes que los de acá.
+  fijarSoloLectura(esSoloLectura(sessionVista))
+
+  useEffect(() => {
+    if (session) {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(session))
+    } else {
+      localStorage.removeItem(STORAGE_KEY)
+    }
+  }, [session])
+
+  // La base rechazó la credencial (venció, cambió la clave, desactivada): a la pantalla de entrada.
+  useEffect(() => {
+    alVencerSesion(() => {
+      fijarTokenSesion(null)
+      setPasswordLogin(null)
+      setVistaComo(null)
+      setSession(null)
+    })
+    return () => alVencerSesion(null)
+  }, [])
+
+  /*
+   * Al abrir la app (y al entrar) se piden rol, área y permisos actuales:
+   * la sesión guardada puede ser vieja. Si la persona fue desactivada o
+   * eliminada, se cierra su sesión. Si no hay conexión, se conserva lo que
+   * había (no se borran los permisos por un corte).
+   */
+  const usuarioSesion = session?.username
+  useEffect(() => {
+    if (!usuarioSesion) return
+    let cancelado = false
+    const actualizar = (cambios: Partial<Session>) =>
+      setSession((s) => (s && s.username === usuarioSesion ? { ...s, ...cambios } : s))
+
+    cargarPerfil(usuarioSesion).then(async (perfil) => {
+      if (cancelado) return
+      if (perfil === undefined) {
+        // Sin conexión o sin la función nueva en la base: al menos los permisos.
+        const permisos = await cargarPermisos(usuarioSesion)
+        if (!cancelado && permisos) actualizar({ permisos })
+        return
+      }
+      if (perfil === null || !perfil.activo) {
+        fijarTokenSesion(null)
+        setPasswordLogin(null)
+        setSession(null)
+        return
+      }
+      actualizar({ rol: perfil.rol, area: perfil.area, esDueno: perfil.esDueno, permisos: perfil.permisos,
+        puestoId: perfil.puestoId,
+        puestoCodigo: perfil.puestoCodigo,
+        puesto: perfil.puesto,
+        nivel: perfil.nivel,
+        titulo: perfil.titulo,
+      })
+    })
+    return () => {
+      cancelado = true
+    }
+  }, [usuarioSesion])
+
+  /*
+   * Login contra la tabla "usuarios" de Supabase (NO Supabase Auth,
+   * por decisión explícita). La verificación de la contraseña pasa
+   * entera adentro de la función verificar_login() en Postgres — acá
+   * nunca se ve el hash, solo el resultado. Ver
+   * supabase/migrations/20260822090000_usuarios_tabla_propia.sql.
+   *
+   * Lo que queda en localStorage (STORAGE_KEY de arriba) es la
+   * SESIÓN ya autenticada, para no tener que loguearse de nuevo en
+   * cada refresh — no es donde vive la contraseña.
+   */
+  async function login(username: string, password: string) {
+    if (!username.trim() || !password.trim()) {
+      return { ok: false as const, error: "Ingresa tu usuario y contraseña." }
+    }
+
+    const { data, error } = await supabase.rpc("verificar_login", {
+      p_usuario: username.trim(),
+      p_password: password,
+    })
+
+    if (error) {
+      // 5 claves malas seguidas: la base bloquea ese usuario 15 minutos y lo dice.
+      if (error.message?.startsWith("Demasiados intentos")) return { ok: false as const, error: error.message }
+      return { ok: false as const, error: "No se pudo validar el usuario. Intenta de nuevo." }
+    }
+    const perfil = data?.[0]
+    if (!perfil) {
+      return { ok: false as const, error: "Usuario o contraseña incorrectos." }
+    }
+
+    // Antes de pedir nada más: desde acá cada petición lleva la credencial.
+    const token: string | null = perfil.token ?? null
+    fijarTokenSesion(token)
+    limpiarAvisoSalida()
+    const permisos = (await cargarPermisos(perfil.usuario)) ?? []
+    // El puesto antes de mostrar nada: sin él, un puesto con rol VISTA entraría como Solo Vista hasta que cargue.
+    const actual = await cargarPerfil(perfil.usuario)
+    const puesto = actual
+      ? { puestoId: actual.puestoId, puestoCodigo: actual.puestoCodigo, puesto: actual.puesto, nivel: actual.nivel, titulo: actual.titulo }
+      : {}
+    setPasswordLogin(password)
+    setSession({
+      token,
+      permisos,
+      ...puesto,
+      username: perfil.usuario,
+      nombre: perfil.nombre ?? perfil.usuario,
+      cedula: perfil.cedula ?? null,
+      area: perfil.area_codigo as AreaCodigo | null,
+      rol: perfil.rol_codigo as RolCodigo,
+      esDueno: Boolean(perfil.ve_errores),
+      // Fuerza el primer ingreso si la base lo marca, o si la clave
+      // escrita no cumple la política — esto último el hash no lo
+      // puede saber, solo se ve aquí con el texto plano.
+      debeCompletarPerfil: Boolean(perfil.debe_completar_perfil) || !claveCumplePolitica(password),
+    })
+    return { ok: true as const }
+  }
+
+  async function completarPrimerIngreso(datos: DatosPrimerIngreso) {
+    if (!session) return { ok: false as const, error: "No hay una sesión iniciada." }
+    if (!passwordLogin) {
+      return { ok: false as const, error: "Se perdió la sesión. Inicia sesión de nuevo para continuar." }
+    }
+    if (!datos.nombre.trim()) {
+      return { ok: false as const, error: "Ingresa tu nombre y apellido." }
+    }
+    const cedula = datos.cedula.trim() || null
+    if (cedula !== null && !cedulaValida(cedula)) {
+      return { ok: false as const, error: "La cédula debe ser X.XXX.XXX o XX.XXX.XXX." }
+    }
+    if (!claveCumplePolitica(datos.passwordNueva)) {
+      return { ok: false as const, error: "La contraseña nueva debe ser de 4 dígitos y distinta de 1234." }
+    }
+
+    const { error } = await supabase.rpc("completar_primer_ingreso", {
+      p_usuario: session.username,
+      p_password_actual: passwordLogin,
+      p_password_nueva: datos.passwordNueva,
+      p_nombre: datos.nombre.trim(),
+      p_cedula: cedula,
+    })
+    if (error) {
+      return { ok: false as const, error: error.message || "No se pudo guardar. Intenta de nuevo." }
+    }
+
+    setPasswordLogin(datos.passwordNueva)
+    setSession({ ...session, nombre: datos.nombre.trim(), cedula, debeCompletarPerfil: false })
+    return { ok: true as const }
+  }
+
+  function logout() {
+    const token = tokenSesion()
+    if (token) cerrarSesionEnBase(token)
+    fijarTokenSesion(null)
+    setPasswordLogin(null)
+    setVistaComo(null)
+    setSession(null)
+  }
+
+  return (
+    <AuthContext.Provider value={{ session: sessionVista, sessionReal: session, vistaComo: vistaActiva, verComo, login, completarPrimerIngreso, logout }}>
+      {children}
+    </AuthContext.Provider>
+  )
+}
+
+export function useAuth() {
+  const ctx = useContext(AuthContext)
+  if (!ctx) throw new Error("useAuth debe usarse dentro de AuthProvider")
+  return ctx
+}

@@ -1,0 +1,121 @@
+services:
+  dev:
+    build:
+      context: .
+      target: dev
+    ports:
+      - "5173:5173"
+    volumes:
+      - .:/app
+      - /app/node_modules
+    # El volumen de node_modules sobrevive a los rebuild: si se agregó un paquete (ej. html-to-image),
+    # quedaba sin instalar y las pantallas daban "Cannot find module". Al arrancar se instala lo que falte.
+    command: sh -c "npm install --no-audit --no-fund && npm run dev -- --host 0.0.0.0"
+
+  preview:
+    build:
+      context: .
+      target: preview
+    ports:
+      - "4035:4173"
+    # Vite reenvía /api y /archivos a estos contenedores (ver vite.config.ts).
+    environment:
+      - API_DESTINO=http://api:3000
+      - ARCHIVOS_DESTINO=http://archivos:4038
+    depends_on:
+      - api
+      - archivos
+    restart: unless-stopped
+    profiles:
+      - preview
+
+  # PostgREST: la API de la base PostgreSQL (lo que antes daba Supabase).
+  # Los datos de conexión salen de .env.local (DB_*), por eso se levanta con
+  #   docker compose --env-file .env.local --profile preview up -d --build
+  # PGRST_DB_URI vacío = usa las variables PG* de abajo (libpq), así una
+  # clave con caracteres raros no rompe la cadena de conexión.
+  api:
+    image: postgrest/postgrest:v12.2.3
+    ports:
+      - "4037:3000"
+    environment:
+      - PGRST_DB_URI=postgresql://
+      - PGHOST=${DB_HOST:?Falta DB_HOST - levantar con --env-file .env.local}
+      - PGPORT=${DB_PORT:-5432}
+      - PGDATABASE=${DB_NAME:?Falta DB_NAME}
+      - PGUSER=${DB_USER:?Falta DB_USER}
+      - PGPASSWORD=${DB_PASSWORD:?Falta DB_PASSWORD}
+      - PGSSLMODE=prefer
+      - PGRST_DB_SCHEMAS=public
+      - PGRST_DB_ANON_ROLE=anon
+    restart: unless-stopped
+    profiles:
+      - preview
+
+  # Los PDF de las actas (lo que antes era el Storage de Supabase). La
+  # carpeta queda FUERA del proyecto para que sincronizar con WinSCP no
+  # la borre: /home/inf05/natulac-actas si el proyecto está en
+  # /home/inf05/natulac-aseptico.
+  archivos:
+    build:
+      context: ./archivos
+    ports:
+      - "4038:4038"
+    volumes:
+      - ../natulac-actas:/datos/actas
+    restart: unless-stopped
+    profiles:
+      - preview
+
+  # Manda los avisos de Solicitudes de Inspección / Intervención que la base
+  # deja en correos_pendientes (ver correo/servidor.mjs). La base, con las
+  # mismas DB_* del servicio api; la cuenta que manda, con SMTP_* y CORREO_*
+  # de .env.local. Sin SMTP_HOST o CORREO_PARA no manda nada.
+  correo:
+    build:
+      context: ./correo
+    environment:
+      - PGHOST=${DB_HOST:?Falta DB_HOST - levantar con --env-file .env.local}
+      - PGPORT=${DB_PORT:-5432}
+      - PGDATABASE=${DB_NAME:?Falta DB_NAME}
+      - PGUSER=${DB_USER:?Falta DB_USER}
+      - PGPASSWORD=${DB_PASSWORD:?Falta DB_PASSWORD}
+      - PGSSLMODE=prefer
+      - SMTP_HOST=${SMTP_HOST:-}
+      - SMTP_PUERTO=${SMTP_PUERTO:-587}
+      - SMTP_USUARIO=${SMTP_USUARIO:-}
+      - SMTP_CLAVE=${SMTP_CLAVE:-}
+      - CORREO_DE=${CORREO_DE:-}
+      - CORREO_PARA=${CORREO_PARA:-}
+      - APP_URL=${APP_URL:-}
+    restart: unless-stopped
+    profiles:
+      - preview
+
+  plc-bridge:
+    build:
+      context: ./plc-bridge
+    # El primer numero es el puerto del servidor; el segundo tiene que ser
+    # igual a PLC_BRIDGE_PUERTO de bridge.conf.
+    ports:
+      - "4036:4036"
+    # Toda la configuracion (PLC, tags, puerto) esta en plc-bridge/bridge.conf;
+    # montado asi, un cambio ahi solo pide reiniciar (no reconstruir):
+    #   docker compose --env-file .env.local --profile preview restart plc-bridge
+    # El registro de llenados queda FUERA del proyecto (como las actas), para
+    # que sincronizar con WinSCP o reconstruir no lo borre:
+    # /home/inf05/natulac-plc-datos.
+    volumes:
+      - ./plc-bridge/bridge.conf:/app/bridge.conf:ro
+      - ../natulac-plc-datos:/app/datos
+    environment:
+      # Le gana a bridge.conf. En "real" el servidor necesita ruta de red
+      # hacia 192.168.0.0/24 (subred del PLC, distinta de la 192.168.10.0/24
+      # de este servidor); sin ella la pantalla muestra "sin conexion al PLC".
+      - PLC_MODO=real
+      # Ahi el bridge revisa el permiso de quien abre/cierra una valvula
+      # auxiliar y deja la auditoria (ver plc-bridge/src/control.js).
+      - PLC_API_URL=http://api:3000
+    restart: unless-stopped
+    profiles:
+      - preview

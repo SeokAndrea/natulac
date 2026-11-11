@@ -1,0 +1,133 @@
+import { useAuth } from "@/lib/auth"
+import { apps, puedeVerApp, type AppDef } from "@/lib/apps"
+import { useTarjetasOcultas } from "@/lib/tarjetasOcultas"
+import { esAreaDeApoyo, type RolCodigo } from "@/lib/catalogos"
+import { puede } from "@/lib/permisos"
+import { useSesionTurno } from "@/lib/sesionTurno"
+import { continuidadReciente, type ContinuidadTurno } from "@/lib/continuidadTurno"
+
+/*
+ * Navegación entre pantallas: lo comparten el Hub, el menú lateral (PC) y
+ * el botón flotante (teléfono). Misma lista y mismos criterios que las
+ * tarjetas del Hub (src/lib/apps.tsx → puedeVerApp).
+ */
+
+export const TITULOS_SECCION: Record<NonNullable<AppDef["seccion"]>, string> = {
+  produccion: "Producción",
+  apoyo: "Servicios de apoyo",
+  auditoria: "Auditoría",
+  "base-datos": "Base de Datos",
+}
+
+/**
+ * Rol Supervisor: el flujo del turno, en este orden.
+ * Arriba de todo en el Hub del teléfono.
+ */
+export const FLUJO_SUPERVISOR = [
+  "comenzar-turno",
+  "preparacion",
+  "lineas",
+  "producto-terminado",
+  "finalizar-turno",
+  "mis-actas",
+  "panel-produccion",
+]
+
+/** Supervisor (quien más usa la app): lo que tiene en el botón flotante, en este orden. */
+export const RAPIDAS_SUPERVISOR = ["lineas", "preparacion", "panel-produccion"]
+
+export interface Seccion {
+  titulo: string | null
+  apps: AppDef[]
+}
+
+/**
+ * Agrupa las tarjetas por su `seccion`, en el orden en que aparece cada
+ * grupo. Las que no tienen `seccion` van juntas, sin título. Para un área
+ * de apoyo, las de "produccion" (ej. Reportes de paradas en Mantenimiento)
+ * van en "apoyo".
+ */
+export function agruparPorSeccion(lista: AppDef[], areaDeApoyo: boolean, rol?: RolCodigo | null): Seccion[] {
+  const grupos = agruparEnOrden(lista, areaDeApoyo)
+  if (!rol || !ROLES_CONTROL_PRIMERO.includes(rol)) return grupos
+  const lugar = (s: Seccion) => {
+    const i = ORDEN_SECCIONES_CONTROL.indexOf(s.titulo ?? "")
+    return i === -1 ? ORDEN_SECCIONES_CONTROL.length : i
+  }
+  return [...grupos].sort((a, b) => lugar(a) - lugar(b))
+}
+
+/**
+ * Jefe y Analista de Producción: primero lo de control, al final el
+ * flujo del turno. Por rol, como todo el Inicio: el
+ * cargo es solo el nombre del puesto.
+ */
+const ROLES_CONTROL_PRIMERO: RolCodigo[] = ["JEFE_PRODUCCION", "ANALISTA"]
+const ORDEN_SECCIONES_CONTROL = [TITULOS_SECCION.auditoria, TITULOS_SECCION["base-datos"], TITULOS_SECCION.produccion]
+
+function agruparEnOrden(lista: AppDef[], areaDeApoyo: boolean): Seccion[] {
+  const grupos: Seccion[] = []
+  const indicePorTitulo = new Map<string | null, number>()
+
+  for (const app of lista) {
+    const seccion = areaDeApoyo && app.seccion === "produccion" ? "apoyo" : app.seccion
+    const titulo = seccion ? TITULOS_SECCION[seccion] : null
+    let indice = indicePorTitulo.get(titulo)
+    if (indice === undefined) {
+      indice = grupos.length
+      indicePorTitulo.set(titulo, indice)
+      grupos.push({ titulo, apps: [] })
+    }
+    grupos[indice].apps.push(app)
+  }
+
+  return grupos
+}
+
+/** Por qué una app está bloqueada (o no), con el turno de la sesión. Mismo criterio en el Hub y en la navegación. */
+export function bloqueoDeApp(app: AppDef, turnoActivo: boolean, turnoPorAsumir: boolean, continuidad: ContinuidadTurno | null = null, area: string | null = null) {
+  const porTurnoEnCurso = !!app.bloqueaConTurno && turnoActivo && !turnoPorAsumir
+  const sinTurno = app.requiereTurno && !turnoActivo && !(area !== null && app.sinTurnoAreas?.includes(area))
+  /** Turno recién abierto por continuidad: "HH:MM" en que se habilita (ver src/lib/continuidadTurno.ts). */
+  const habilitaA = app.bloqueaEnContinuidad && continuidad ? continuidad.finalizableDesde : null
+  return { bloqueada: !app.href || sinTurno || porTurnoEnCurso || habilitaA !== null, sinTurno, porTurnoEnCurso, habilitaA }
+}
+
+/** Estado del turno que usan el Hub y la navegación para bloquear tarjetas. */
+export function useTurnoDeLaSesion() {
+  const { session } = useAuth()
+  const sesion = useSesionTurno()
+  const turnoActivo = sesion.turnoId !== null
+  // Mismo criterio que ComenzarTurno: solo el responsable actual "tiene" el turno; el resto puede asumirlo o tomar el relevo.
+  const soyResponsable = !sesion.sinResponsable && sesion.supervisorUsuario === session?.username.toLowerCase()
+  const turnoPorAsumir = turnoActivo && !soyResponsable && puede(session, "TURNO_ASUMIR")
+  const continuidad = continuidadReciente(sesion, session?.username ?? null)
+  return { turnoActivo, turnoPorAsumir, sinResponsable: sesion.sinResponsable, continuidad }
+}
+
+/**
+ * Lo que muestran el menú lateral y el botón flotante:
+ * - `secciones`: todas las pantallas que puede abrir, agrupadas como en el Hub, con los paneles y accesos primero.
+ * - `rapidas`: las principales y no bloqueadas, en orden (Supervisor: RAPIDAS_SUPERVISOR).
+ */
+export function useAppsNavegables() {
+  const { session } = useAuth()
+  const { turnoActivo, turnoPorAsumir, continuidad } = useTurnoDeLaSesion()
+  const tarjetasOcultas = useTarjetasOcultas()
+  const visibles = apps.filter((app) => app.href && puedeVerApp(session, app) && !tarjetasOcultas.has(app.slug))
+  const principales = visibles.filter((app) => !app.atajo)
+  const atajos = visibles.filter((app) => app.atajo)
+
+  const secciones = agruparPorSeccion(principales, esAreaDeApoyo(session?.area), session?.rol)
+  // Los paneles y accesos van primero que todo, para todos.
+  if (atajos.length > 0) secciones.unshift({ titulo: "Paneles y accesos", apps: atajos })
+
+  const libre = (app: AppDef) => !bloqueoDeApp(app, turnoActivo, turnoPorAsumir, continuidad, session?.area ?? null).bloqueada
+  const orden =
+    session?.rol === "SUPERVISOR"
+      ? RAPIDAS_SUPERVISOR.map((slug) => visibles.find((app) => app.slug === slug)).filter((app): app is AppDef => !!app)
+      : [...principales, ...atajos]
+  const rapidas = orden.filter(libre)
+
+  return { secciones, rapidas, turnoActivo, turnoPorAsumir, continuidad }
+}

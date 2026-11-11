@@ -1,0 +1,298 @@
+import { describe, expect, it } from "vitest"
+import {
+  LINEAS_DEMO,
+  PRESENTACIONES_DEMO,
+  TURNOS_DEMO,
+  contador,
+  corrida,
+  prep,
+  pt,
+  turnoDemo,
+} from "@/lib/auditoriaDemoFixture"
+import {
+  coincideBusqueda,
+  construirHistorial,
+  loteDeProductoTerminado,
+  rangoDePreset,
+  resumenTurno,
+  turnoEnFiltro,
+} from "@/lib/auditoriaVista"
+
+const BASE = {
+  id: "t",
+  codigo: "X",
+  fecha: "2026-09-02",
+  horaInicio: "22:30:00",
+  turnoTipo: "TURNO_3" as const,
+  grupo: "GRUPO_1" as const,
+  supervisorUsuario: "x",
+  supervisorNombre: "X",
+}
+
+/** El turno de un supervisor con 2 sabores y PT editado (ver auditoriaDemoFixture). */
+const turnoSupervisorDos = TURNOS_DEMO.find((t) => t.detalle.supervisorNombre === "Supervisor Dos" && t.detalle.preparaciones.length === 2)!
+const loteFresa = turnoSupervisorDos.detalle.preparaciones.find((p) => p.saborNombre === "Fresa")!.lote!
+const loteMango = turnoSupervisorDos.detalle.preparaciones.find((p) => p.saborNombre === "Mango")!.lote!
+
+describe("resumenTurno — sabores con sus lotes", () => {
+  const r = resumenTurno(turnoSupervisorDos.detalle, LINEAS_DEMO, PRESENTACIONES_DEMO)
+
+  it("agrupa cada sabor con los lotes que se le prepararon / corrieron", () => {
+    expect(r.sabores).toEqual([
+      { sabor: "Fresa", lotes: [loteFresa] },
+      { sabor: "Mango", lotes: [loteMango] },
+    ])
+  })
+
+  it("mantiene la lista plana de lotes para el buscador", () => {
+    expect(r.lotes).toEqual([loteFresa, loteMango])
+  })
+})
+
+describe("resumenTurno — por línea", () => {
+  const r = resumenTurno(turnoSupervisorDos.detalle, LINEAS_DEMO, PRESENTACIONES_DEMO)
+
+  it("una fila por corrida, con presentación, sabor, lote, cajas, contador y merma de envases", () => {
+    expect(r.porLinea).toHaveLength(2)
+    const l1 = r.porLinea.find((l) => l.linea === "Línea 1")!
+    expect(l1.presentacion).toBe("350 ml")
+    expect(l1.sabor).toBe("Fresa")
+    expect(l1.lote).toBe(loteFresa)
+    expect(l1.cajas).toBe(13 * 120 + 40)
+    // el contador (envases de la llenadora) de esa corrida
+    expect(l1.contador).toBe(
+      turnoSupervisorDos.detalle.contadores
+        .filter((c) => c.corridaId === "c4")
+        .reduce((a, c) => a + c.envasesLlenadora, 0),
+    )
+    expect(l1.contador).toBeGreaterThan(0)
+    expect(l1.mermaEnvasesPct).toBeGreaterThan(0)
+    expect(l1.mermaEnvasesPct).toBeLessThan(15)
+  })
+
+  it("cajas totales = suma de las corridas", () => {
+    expect(r.cajas).toBe(r.porLinea.reduce((t, l) => t + l.cajas, 0))
+    expect(r.cajas).toBe(13 * 120 + 40 + (8 * 120 + 12))
+  })
+})
+
+describe("resumenTurno — litros y merma de semielaborado", () => {
+  const r = resumenTurno(turnoSupervisorDos.detalle, LINEAS_DEMO, PRESENTACIONES_DEMO)
+
+  it("consumidos ≥ producidos y la merma cae en un rango creíble", () => {
+    expect(r.litrosConsumidos).toBeGreaterThan(0)
+    expect(r.litrosProducidos).toBeGreaterThan(0)
+    expect(r.litrosConsumidos).toBeGreaterThanOrEqual(r.litrosProducidos)
+    expect(r.mermaSemielaboradoPct).not.toBeNull()
+    expect(r.mermaSemielaboradoPct!).toBeGreaterThan(0)
+    expect(r.mermaSemielaboradoPct!).toBeLessThan(20)
+  })
+})
+
+describe("loteDeProductoTerminado", () => {
+  it("saca el lote de la corrida que generó la fila (corridaId → LineaEnTurno.lote)", () => {
+    const ptFresa = turnoSupervisorDos.detalle.productoTerminado.find((p) => p.saborNombre === "Fresa")!
+    expect(loteDeProductoTerminado(turnoSupervisorDos.detalle, ptFresa)).toBe(loteFresa)
+  })
+})
+
+describe("construirHistorial — Producto Terminado", () => {
+  it("la fila de PT muestra sabor y lote", () => {
+    const eventos = construirHistorial(turnoSupervisorDos.detalle, LINEAS_DEMO, PRESENTACIONES_DEMO)
+    const filaPt = eventos.find((e) => e.seccion === "Producto Terminado" && e.detalle.includes("Línea 1"))
+    expect(filaPt?.detalle).toContain("Fresa")
+    expect(filaPt?.detalle).toContain(`Lote ${loteFresa}`)
+  })
+
+  it("Comenzar Turno es el primer evento aunque el T3 cruce medianoche", () => {
+    const eventos = construirHistorial(turnoSupervisorDos.detalle, LINEAS_DEMO, PRESENTACIONES_DEMO)
+    expect(eventos[0].seccion).toBe("Comenzar Turno")
+  })
+})
+
+describe("coincideBusqueda", () => {
+  const chips = resumenTurno(turnoSupervisorDos.detalle, LINEAS_DEMO, PRESENTACIONES_DEMO)
+  const eventos = construirHistorial(turnoSupervisorDos.detalle, LINEAS_DEMO, PRESENTACIONES_DEMO)
+  const match = (q: string) => coincideBusqueda(turnoSupervisorDos.detalle, chips, eventos, "Producción Aséptico", q)
+
+  it("vacío = pasa siempre", () => expect(match("")).toBe(true))
+  it("matchea por supervisor", () => expect(match("supervisor dos")).toBe(true))
+  it("matchea por sabor", () => expect(match("mango")).toBe(true))
+  it("matchea por lote", () => expect(match(loteMango.toLowerCase())).toBe(true))
+  it("no matchea algo que no está", () => expect(match("zzz-no-existe")).toBe(false))
+})
+
+describe("rangoDePreset", () => {
+  // Anclado a hora de planta (UTC−4) para que el test no dependa de la
+  // zona del runner.
+  const hoy = new Date("2026-09-03T10:00:00-04:00")
+
+  it("HOY = solo hoy", () => {
+    expect(rangoDePreset("HOY", "", hoy)).toEqual({ desde: "2026-09-03", hasta: "2026-09-03" })
+  })
+  it("AYER = solo el día anterior (el corte de las 7:00 ya está en turno.fecha)", () => {
+    expect(rangoDePreset("AYER", "", hoy)).toEqual({ desde: "2026-09-02", hasta: "2026-09-02" })
+  })
+  it("DIAS_7 = hoy y los 6 anteriores", () => {
+    expect(rangoDePreset("DIAS_7", "", hoy)).toEqual({ desde: "2026-08-28", hasta: "2026-09-03" })
+  })
+  it("FECHA = la fecha exacta elegida", () => {
+    expect(rangoDePreset("FECHA", "2026-07-15", hoy)).toEqual({ desde: "2026-07-15", hasta: "2026-07-15" })
+  })
+})
+
+describe("turnoEnFiltro", () => {
+  const rango = { desde: "2026-09-01", hasta: "2026-09-03" }
+
+  it("acepta un turno dentro del rango sin filtro de tipo", () => {
+    expect(turnoEnFiltro("2026-09-02", "TURNO_3", rango, null)).toBe(true)
+  })
+  it("rechaza un turno fuera del rango", () => {
+    expect(turnoEnFiltro("2026-08-31", "TURNO_1", rango, null)).toBe(false)
+  })
+  it("con filtro de tipo, solo pasa ese tipo", () => {
+    expect(turnoEnFiltro("2026-09-02", "TURNO_1", rango, "TURNO_1")).toBe(true)
+    expect(turnoEnFiltro("2026-09-02", "TURNO_3", rango, "TURNO_1")).toBe(false)
+  })
+})
+
+// ------------------------------------------------------------
+// Guardrails de la merma
+// ------------------------------------------------------------
+describe("guardrails — merma de semielaborado", () => {
+  it("los turnos sanos del fixture NO disparan el flag de parcial ni dan % negativo", () => {
+    for (const t of TURNOS_DEMO) {
+      const r = resumenTurno(t.detalle, LINEAS_DEMO, PRESENTACIONES_DEMO)
+      expect(r.mermaSemielaboradoParcial, `turno ${t.detalle.codigo}`).toBe(false)
+      if (r.mermaSemielaboradoPct !== null) {
+        expect(r.mermaSemielaboradoPct, `turno ${t.detalle.codigo}`).toBeGreaterThanOrEqual(0)
+      }
+    }
+  })
+
+  it("un lote abierto queda en curso: fuera del %, sin marcar parcial", () => {
+    // L1 cerrado: 6.000 preparados, 200 pasaron al lote siguiente, 5.400 envasados.
+    // L2 sigue abierto: su rendimiento sale al cerrarlo.
+    const turno = turnoDemo({
+      ...BASE,
+      preparaciones: [
+        prep({
+          id: "L1",
+          numeroTanque: 1,
+          creadoEn: "22:35:00",
+          saborNombre: "Fresa",
+          lote: "0001",
+          volumenPreparadoL: 6000,
+          volumenAlIniciarTurnoL: 6000,
+          volumenActualL: 200,
+          totales: { preparadoL: 6000, entrantesL: 0, salientesL: 200, envasadoL: 5400, cerrado: true },
+        }),
+        prep({
+          id: "L2",
+          numeroTanque: 2,
+          creadoEn: "23:00:00",
+          saborNombre: "Mango",
+          lote: "0002",
+          volumenPreparadoL: 6000,
+          volumenAlIniciarTurnoL: 6000,
+          volumenActualL: 9000,
+          totales: { preparadoL: 6000, entrantesL: 0, salientesL: 0, envasadoL: 4800, cerrado: false },
+        }),
+      ],
+      corridas: [
+        corrida({ id: "c1", linea: "LINEA_1", activadaEn: "23:05:00", saborNombre: "Fresa", lote: "0001", loteId: "L1", presentacion: "1000" }),
+        corrida({ id: "c2", linea: "LINEA_2", activadaEn: "23:10:00", saborNombre: "Mango", lote: "0002", loteId: "L2", presentacion: "1000" }),
+      ],
+      contadores: [
+        contador({ id: "co1", linea: "LINEA_1", creadoEn: "02:00:00", corridaId: "c1", envasesLlenadora: 5800 }),
+        contador({ id: "co2", linea: "LINEA_2", creadoEn: "02:10:00", corridaId: "c2", envasesLlenadora: 5200 }),
+      ],
+      productoTerminado: [
+        pt({ id: "p1", linea: "LINEA_1", creadoEn: "02:05:00", corridaId: "c1", saborNombre: "Fresa", presentacion: "1000", paletas: 9, cajasSueltas: 0, litrosProducidos: 5400 }),
+        pt({ id: "p2", linea: "LINEA_2", creadoEn: "02:15:00", corridaId: "c2", saborNombre: "Mango", presentacion: "1000", paletas: 8, cajasSueltas: 0, litrosProducidos: 4800 }),
+      ],
+    })
+    const r = resumenTurno(turno, LINEAS_DEMO, PRESENTACIONES_DEMO)
+    // Solo L1: 5.400 / (6.000 − 200) → merma 6,9 %. L2 en curso no es "parcial".
+    expect(r.mermaSemielaboradoParcial).toBe(false)
+    expect(r.litrosSinContraste).toBe(0)
+    expect(r.mermaSemielaboradoPct).toBe(6.9)
+  })
+
+  it("sin filtros: un lote con PT por encima de lo preparado da merma negativa, tal cual", () => {
+    const turno = turnoDemo({
+      ...BASE,
+      preparaciones: [
+        prep({
+          id: "L1",
+          numeroTanque: 1,
+          creadoEn: "22:35:00",
+          saborNombre: "Pera",
+          lote: "0004",
+          volumenPreparadoL: 10000,
+          volumenAlIniciarTurnoL: 10000,
+          volumenActualL: 100,
+          totales: { preparadoL: 10000, entrantesL: 0, salientesL: 0, envasadoL: 19440, cerrado: true },
+        }),
+      ],
+      corridas: [
+        corrida({ id: "c1", linea: "LINEA_1", activadaEn: "23:05:00", saborNombre: "Pera", lote: "0004", loteId: "L1", presentacion: "1000" }),
+        corrida({ id: "c1b", linea: "LINEA_1", activadaEn: "01:00:00", saborNombre: "Pera", lote: "0004", loteId: "L1", presentacion: "1000" }),
+      ],
+      contadores: [
+        contador({ id: "co1", linea: "LINEA_1", creadoEn: "00:30:00", corridaId: "c1", envasesLlenadora: 10000 }),
+        contador({ id: "co1b", linea: "LINEA_1", creadoEn: "05:00:00", corridaId: "c1b", envasesLlenadora: 10000 }),
+      ],
+      productoTerminado: [
+        pt({ id: "p1", linea: "LINEA_1", creadoEn: "00:35:00", corridaId: "c1", saborNombre: "Pera", presentacion: "1000", paletas: 10, cajasSueltas: 0, litrosProducidos: 9720 }),
+        pt({ id: "p1b", linea: "LINEA_1", creadoEn: "05:05:00", corridaId: "c1b", saborNombre: "Pera", presentacion: "1000", paletas: 10, cajasSueltas: 0, litrosProducidos: 9720 }),
+      ],
+    })
+    const r = resumenTurno(turno, LINEAS_DEMO, PRESENTACIONES_DEMO)
+    // Σ PT del lote = 19.440 sobre 10.000 preparados: se muestra, no se esconde.
+    expect(r.mermaSemielaboradoParcial).toBe(false)
+    expect(r.mermaSemielaboradoPct).not.toBeNull()
+    expect(r.mermaSemielaboradoPct!).toBeLessThan(0)
+  })
+})
+
+describe("guardrails — porLinea", () => {
+  it("agrupa por línea + lote + presentación; corridas idénticas se cuentan una vez y se marcan", () => {
+    const turno = turnoDemo({
+      ...BASE,
+      preparaciones: [prep({ id: "L1", numeroTanque: 1, creadoEn: "22:35:00", saborNombre: "Pera", lote: "0004", volumenPreparadoL: 20000, volumenAlIniciarTurnoL: 20000, volumenActualL: 200 })],
+      corridas: [
+        corrida({ id: "c1", linea: "LINEA_1", activadaEn: "23:05:00", saborNombre: "Pera", lote: "0004", loteId: "L1", presentacion: "1000" }),
+        corrida({ id: "c2", linea: "LINEA_1", activadaEn: "01:00:00", saborNombre: "Pera", lote: "0004", loteId: "L1", presentacion: "1000" }),
+      ],
+      contadores: [
+        contador({ id: "co1", linea: "LINEA_1", creadoEn: "00:30:00", corridaId: "c1", envasesLlenadora: 10300 }),
+        contador({ id: "co2", linea: "LINEA_1", creadoEn: "05:00:00", corridaId: "c2", envasesLlenadora: 10300 }),
+      ],
+      productoTerminado: [
+        pt({ id: "p1", linea: "LINEA_1", creadoEn: "00:35:00", corridaId: "c1", saborNombre: "Pera", presentacion: "1000", paletas: 10, cajasSueltas: 5, litrosProducidos: 6120 }),
+        pt({ id: "p2", linea: "LINEA_1", creadoEn: "05:05:00", corridaId: "c2", saborNombre: "Pera", presentacion: "1000", paletas: 10, cajasSueltas: 5, litrosProducidos: 6120 }),
+      ],
+    })
+    const r = resumenTurno(turno, LINEAS_DEMO, PRESENTACIONES_DEMO)
+    expect(r.porLinea).toHaveLength(1)
+    expect(r.porLinea[0].cajas).toBe(10 * 48 + 5) // NO duplicado
+    expect(r.porLinea[0].posibleDuplicado).toBe(true)
+  })
+
+  it("una corrida activada sin producción va a corridasSinProduccion, no a porLinea", () => {
+    const turno = turnoDemo({
+      ...BASE,
+      preparaciones: [prep({ id: "L1", numeroTanque: 1, creadoEn: "22:35:00", saborNombre: "Pera", lote: "0003", volumenPreparadoL: 10000, volumenAlIniciarTurnoL: 10000, volumenActualL: 4000 })],
+      corridas: [
+        corrida({ id: "c1", linea: "LINEA_1", activadaEn: "23:05:00", saborNombre: "Pera", lote: "0003", loteId: "L1", presentacion: "1000" }),
+        corrida({ id: "cstub", linea: "LINEA_2", activadaEn: "23:40:00", saborNombre: "Pera", lote: "0003", loteId: "L1", presentacion: "250" }),
+      ],
+      contadores: [contador({ id: "co1", linea: "LINEA_1", creadoEn: "02:00:00", corridaId: "c1", envasesLlenadora: 6300 })],
+      productoTerminado: [pt({ id: "p1", linea: "LINEA_1", creadoEn: "02:05:00", corridaId: "c1", saborNombre: "Pera", presentacion: "1000", paletas: 6, cajasSueltas: 0, litrosProducidos: 3600 })],
+    })
+    const r = resumenTurno(turno, LINEAS_DEMO, PRESENTACIONES_DEMO)
+    expect(r.porLinea.map((l) => l.linea)).toEqual(["Línea 1"])
+    expect(r.corridasSinProduccion).toEqual(["Línea 2 · Lote 0003"])
+  })
+})

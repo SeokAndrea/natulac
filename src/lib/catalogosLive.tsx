@@ -1,0 +1,222 @@
+import { createContext, useContext, useEffect, useState, type ReactNode } from "react"
+import { supabase } from "@/lib/supabase"
+import { useAuth } from "@/lib/auth"
+import { AREA_QUE_MIRA_EL_APOYO, esAreaDeApoyo, registrarTiposDeArea, type LineaCodigo, type PresentacionCodigo } from "@/lib/catalogos"
+import type { AreaEstructura } from "@/lib/estructura"
+
+/*
+ * Versión EN VIVO (Supabase) de líneas, presentaciones y velocidades
+ * de llenadora — reemplaza a las constantes hardcodeadas del mismo
+ * nombre en catalogos.ts, que quedaron solo para TURNO_TIPOS/GRUPOS (catálogos que casi no cambian). Se carga UNA
+ * vez acá (ver CatalogosProvider en main.tsx) y la comparten todos
+ * los componentes que antes leían las constantes estáticas —
+ * Comenzar Turno, el banner de estado, el acta de Finalizar Turno, y
+ * las pestañas de Edición de Datos, que llaman a recargar() después
+ * de cada cambio para que se vea reflejado en el resto de la app sin
+ * recargar la página.
+ */
+export interface LineaLive {
+  id: string
+  codigo: LineaCodigo
+  nombre: string
+  activo: boolean
+}
+
+export interface PresentacionLive {
+  id: string
+  /** Igual que antes: el volumen en ml, como string, hace de "código". */
+  codigo: PresentacionCodigo
+  nombre: string
+  volumenMl: number
+  cajasXCamada: number
+  cantCamada: number
+  cajasXPaleta: number
+  litrosXCaja: number
+  envasesXCaja: number
+  activo: boolean
+}
+
+export interface VelocidadLive {
+  id: string
+  linea: LineaCodigo
+  presentacion: PresentacionCodigo
+  maquina: string
+  envasesHora: number
+  litrosHora: number
+  activo: boolean
+}
+
+interface CatalogosContextValue {
+  /** Las áreas de la base (nombre, tipo, orden). `personas` va en 0: el conteo es de listar_estructura. */
+  areas: AreaEstructura[]
+  /** Las líneas del área de la sesión. Sin área fija (Super Admin): todas menos las de Pruebas. */
+  lineas: LineaLive[]
+  /** Todas, incluidas las de Pruebas: solo para Edición de Datos. */
+  lineasTodas: LineaLive[]
+  presentaciones: PresentacionLive[]
+  velocidades: VelocidadLive[]
+  cargando: boolean
+  recargar: () => Promise<void>
+}
+
+const CatalogosContext = createContext<CatalogosContextValue | null>(null)
+
+interface FilaArea {
+  codigo: string
+  nombre: string
+  tipo: "PRODUCCION" | "APOYO"
+  activo: boolean
+  orden: number
+}
+
+interface FilaLinea {
+  linea_id: string
+  codigo: string
+  nombre: string
+  area_codigo: string
+  activo: boolean
+}
+
+interface FilaPresentacion {
+  presentacion_id: string
+  volumen_ml: number
+  cajas_x_camada: number
+  cant_camada: number
+  cajas_x_paleta: number
+  litros_x_caja: number
+  envases_x_caja: number
+  activo: boolean
+}
+
+interface FilaVelocidad {
+  velocidad_id: string
+  linea_codigo: string
+  presentacion_volumen_ml: number
+  maquina: string
+  envases_hora: number
+  litros_hora: number
+  activo: boolean
+}
+
+export function CatalogosProvider({ children }: { children: ReactNode }) {
+  const { session } = useAuth()
+  const [areas, setAreas] = useState<AreaEstructura[]>([])
+  const [lineasTodas, setLineasTodas] = useState<LineaLive[]>([])
+  /** Área de cada línea (para sacar las de Pruebas cuando la sesión no tiene área). */
+  const [areaDeLinea, setAreaDeLinea] = useState<Record<string, string>>({})
+  const [presentaciones, setPresentaciones] = useState<PresentacionLive[]>([])
+  const [velocidades, setVelocidades] = useState<VelocidadLive[]>([])
+  const [cargando, setCargando] = useState(true)
+
+  async function recargar() {
+    // area null (SUPERADMINISTRADOR o todavía sin sesión) = sin filtrar.
+    // Servicios Industriales es un área de apoyo sin líneas propias, pero
+    // el Panel de Producción (la única pantalla de producción a la que
+    // entra) necesita ver las líneas de Aséptico igual que un supervisor
+    // — filtrar por su propia área devolvía [] siempre. OJO: acá no vale
+    // pasar null como con el Super Admin — listar_lineas(null) no excluye
+    // Pruebas (a diferencia de estado_planta_actual), así que Servicios
+    // Industriales vería también las líneas de Pruebas mezcladas. Aséptico
+    // es la única área productiva real que queda (Vacío se eliminó del
+    // todo el 2026-09-25), así que se filtra directo a esa.
+    // Calidad y Mantenimiento (también áreas de apoyo) igual: miran Aséptico.
+    // Las áreas van primero: el tipo de cada una (APOYO o no) decide qué líneas pedir.
+    const areasRes = await supabase.rpc("listar_areas")
+    const filasAreas = (areasRes.data ?? []) as FilaArea[]
+    registrarTiposDeArea(filasAreas)
+    setAreas(filasAreas.map((f) => ({ ...f, personas: 0 })))
+
+    const areaCatalogo =
+      esAreaDeApoyo(session?.area)
+        ? AREA_QUE_MIRA_EL_APOYO
+        : (session?.area ?? null)
+    const [lineasRes, presentacionesRes, velocidadesRes] = await Promise.all([
+      supabase.rpc("listar_lineas", { p_area_codigo: areaCatalogo }),
+      supabase.rpc("listar_presentaciones"),
+      supabase.rpc("listar_velocidades"),
+    ])
+
+    const filasLineas = (lineasRes.data ?? []) as FilaLinea[]
+    setAreaDeLinea(Object.fromEntries(filasLineas.map((f) => [f.linea_id, f.area_codigo])))
+    setLineasTodas(
+      filasLineas.map((f) => ({
+        id: f.linea_id,
+        codigo: f.codigo as LineaCodigo,
+        nombre: f.nombre,
+        activo: f.activo,
+      })),
+    )
+    setPresentaciones(
+      ((presentacionesRes.data ?? []) as FilaPresentacion[]).map((f) => ({
+        id: f.presentacion_id,
+        codigo: String(f.volumen_ml),
+        nombre: `${f.volumen_ml} ml`,
+        volumenMl: f.volumen_ml,
+        cajasXCamada: f.cajas_x_camada,
+        cantCamada: f.cant_camada,
+        cajasXPaleta: f.cajas_x_paleta,
+        litrosXCaja: f.litros_x_caja,
+        envasesXCaja: f.envases_x_caja,
+        activo: f.activo,
+      })),
+    )
+    setVelocidades(
+      ((velocidadesRes.data ?? []) as FilaVelocidad[]).map((f) => ({
+        id: f.velocidad_id,
+        linea: f.linea_codigo as LineaCodigo,
+        presentacion: String(f.presentacion_volumen_ml),
+        maquina: f.maquina,
+        envasesHora: f.envases_hora,
+        litrosHora: f.litros_hora,
+        activo: f.activo,
+      })),
+    )
+    setCargando(false)
+  }
+
+  // Sin área fija (Super Admin, o un usuario sin área) listar_lineas trae TODAS, también las de
+  // Pruebas (L-T1/T2/T3): en Líneas, Finalizar Turno, el acta y los paneles salían mezcladas con las
+  // de Aséptico (Un supervisor, 2026-10-06). Las pantallas de producción no las ven; Edición de Datos usa lineasTodas.
+  const lineas = session?.area === "PRUEBAS" ? lineasTodas : lineasTodas.filter((l) => areaDeLinea[l.id] !== "PRUEBAS")
+
+  useEffect(() => {
+    recargar()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [session?.area])
+
+  return (
+    <CatalogosContext.Provider value={{ areas, lineas, lineasTodas, presentaciones, velocidades, cargando, recargar }}>
+      {children}
+    </CatalogosContext.Provider>
+  )
+}
+
+export function useCatalogosLive() {
+  const ctx = useContext(CatalogosContext)
+  if (!ctx) throw new Error("useCatalogosLive debe usarse dentro de CatalogosProvider")
+  return ctx
+}
+
+/** Presentaciones activas con alguna velocidad tabulada para una línea dada. */
+export function presentacionesPorLineaLive(velocidades: VelocidadLive[], linea: LineaCodigo): PresentacionCodigo[] {
+  return [...new Set(velocidades.filter((v) => v.activo && v.linea === linea).map((v) => v.presentacion))]
+}
+
+export function velocidadesParaLive(velocidades: VelocidadLive[], linea: LineaCodigo, presentacion: PresentacionCodigo) {
+  return velocidades.filter((v) => v.activo && v.linea === linea && v.presentacion === presentacion)
+}
+
+export function litrosHoraDeLive(
+  velocidades: VelocidadLive[],
+  linea: LineaCodigo,
+  presentacion: PresentacionCodigo,
+  envasesHora: number,
+): number | null {
+  return velocidades.find((v) => v.linea === linea && v.presentacion === presentacion && v.envasesHora === envasesHora)
+    ?.litrosHora ?? null
+}
+
+/** Nombre de un área desde la lista de la base; si no está (todavía cargando), el código tal cual. */
+export function nombreDeArea(areas: readonly { codigo: string; nombre: string }[], codigo: string): string {
+  return areas.find((a) => a.codigo === codigo)?.nombre ?? codigo
+}

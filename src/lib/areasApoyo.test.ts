@@ -1,0 +1,66 @@
+import { describe, expect, it } from "vitest"
+import type { Session } from "@/lib/auth"
+import { apps, puedeVerApp } from "@/lib/apps"
+import { esAreaDeApoyo, registrarTiposDeArea, type AreaCodigo, type RolCodigo } from "@/lib/catalogos"
+
+function sesion(area: AreaCodigo, rol: RolCodigo, permisos: Session["permisos"] = []): Session {
+  return { username: "prueba", nombre: "Prueba", cedula: null, area, rol, esDueno: false, permisos, debeCompletarPerfil: false }
+}
+const visibles = (s: Session) => apps.filter((a) => puedeVerApp(s, a)).map((a) => a.slug)
+const PRODUCCION = ["comenzar-turno", "preparacion", "lineas", "producto-terminado", "finalizar-turno", "mis-actas", "programacion"]
+const PERMISOS_SUPERVISOR: Session["permisos"] = ["TURNO_ASUMIR", "TURNO_CARGAR", "PARADAS_REGISTRAR"]
+
+describe("áreas de apoyo", () => {
+  it("Calidad, Mantenimiento, Servicios Industriales y Otros son de apoyo; Aséptico, Pruebas y sin área no", () => {
+    expect(["CALIDAD", "MANTENIMIENTO", "SERVICIOS_INDUSTRIALES", "OTROS"].every(esAreaDeApoyo)).toBe(true)
+    expect([esAreaDeApoyo("ASEPTICO"), esAreaDeApoyo("PRUEBAS"), esAreaDeApoyo(null)]).toEqual([false, false, false])
+  })
+
+  it("las tarjetas de producción las decide el rol, no el área", () => {
+    expect(visibles(sesion("ASEPTICO", "SUPERVISOR", PERMISOS_SUPERVISOR))).toEqual(expect.arrayContaining(PRODUCCION))
+    expect(visibles(sesion("MANTENIMIENTO", "MANTENIMIENTO", ["PARADAS_MANTENIMIENTO", "SIF_GESTIONAR"])).filter((s) => PRODUCCION.includes(s))).toEqual(["lineas"]) // Líneas en Modo Paradas, sin abrir turno
+    expect(visibles(sesion("CALIDAD", "CALIDAD", ["LOTE_LIBERAR"])).filter((s) => PRODUCCION.includes(s))).toEqual([])
+  })
+
+  it("Servicios Industriales ve solo sus dos tarjetas (y los accesos de todos)", () => {
+    expect(visibles(sesion("SERVICIOS_INDUSTRIALES", "SERVICIOS_INDUSTRIALES", ["LECTURAS_SI"])).sort()).toEqual([
+      "manual",
+      "panel-paradas",
+      "panel-produccion",
+      "registros-servicios-industriales",
+      "servicios-industriales",
+    ])
+  })
+
+  it("la tarjeta de Calidad está en prueba: solo Pruebas la ve, aunque se libere lotes", () => {
+    expect(visibles(sesion("CALIDAD", "SUPERVISOR_CALIDAD", ["LOTE_LIBERAR", "CALIDAD_PARAMETROS"]))).not.toContain("calidad")
+    expect(visibles(sesion("PRUEBAS", "SUPERVISOR", ["LOTE_LIBERAR"]))).toContain("calidad")
+    expect(visibles(sesion("ASEPTICO", "JEFE_PRODUCCION", ["LOTE_LIBERAR", "TURNO_CARGAR"]))).not.toContain("calidad")
+  })
+
+  it("Validar jornada sigue en prueba: solo el Área de Pruebas", () => {
+    expect(visibles(sesion("ASEPTICO", "ANALISTA", ["VALIDAR"]))).not.toContain("validar-jornada")
+    expect(visibles(sesion("PRUEBAS", "ANALISTA", ["VALIDAR"]))).toContain("validar-jornada")
+  })
+
+  it("Mantenimiento ve Reportes de paradas", () => {
+    expect(visibles(sesion("MANTENIMIENTO", "MANTENIMIENTO", ["REPORTES_PARADAS_VER"]))).toContain("reportes-paradas")
+  })
+})
+
+describe("áreas de apoyo creadas en Áreas y puestos", () => {
+  it("un área nueva de tipo APOYO cuenta como apoyo una vez cargada la lista; las conocidas valen antes", () => {
+    expect(esAreaDeApoyo("ALMACEN")).toBe(false)
+    expect(esAreaDeApoyo("MANTENIMIENTO")).toBe(true)
+    registrarTiposDeArea([
+      { codigo: "ALMACEN", tipo: "APOYO" },
+      { codigo: "ASEPTICO", tipo: "PRODUCCION" },
+      { codigo: "MANTENIMIENTO", tipo: "APOYO" },
+    ])
+    expect(esAreaDeApoyo("ALMACEN")).toBe(true)
+    expect(esAreaDeApoyo("ASEPTICO")).toBe(false)
+    expect(esAreaDeApoyo("MANTENIMIENTO")).toBe(true)
+    registrarTiposDeArea([])
+    expect(esAreaDeApoyo("ALMACEN")).toBe(false)
+  })
+})

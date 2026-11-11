@@ -1,0 +1,41 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Dependencias y compilación
+node_modules
+dist
+dist-ssr
+*.local
+
+# Supabase CLI (archivos temporales de la conexión local, no de esquema)
+supabase/.temp
+supabase/.branches
+
+# Editor
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Copias locales de configuración (contienen credenciales)
+*.bak
+.env.*.bak
+
+# Variables de entorno con credenciales (en cualquier carpeta, también plc-bridge/)
+.env
+.env.*
+!.env.example
+
+# Registro de llenados que guarda el plc-bridge al correr en una PC
+plc-bridge/datos/

@@ -1,0 +1,78 @@
+/**
+ * Núcleo de Preparación: el ciclo idealizado de un lote — iniciar → liberar.
+ * En las áreas con «Calidad libera» encendido, liberar lo hace Calidad al
+ * registrar un análisis conforme (src/lib/calidad.ts).
+ * Nada más. Cualquier función que exista para manejar algo que salió
+ * distinto de lo planeado (un ajuste, una transferencia, guardar en pipa)
+ * va en ajustes.ts, no acá — ver docs/ARQUITECTURA.md.
+ *
+ * Extraídas de src/lib/turno.ts (TurnoProvider) como funciones sueltas:
+ * ya no dependen de un Context de React ni de su estado — reciben
+ * `usuario`/`turnoId` como parámetro y devuelven el turno_json crudo para
+ * que quien las llama decida cómo actualizar su estado. Mismo comportamiento
+ * que hoy, ninguna RPC nueva.
+ */
+import { supabase } from "@/lib/supabase"
+import type { DatosIniciarPreparacion, Resultado } from "./tipos"
+
+export async function iniciarPreparacion(
+  usuario: string,
+  turnoId: string,
+  datos: DatosIniciarPreparacion,
+): Promise<Resultado & { data?: unknown }> {
+  const { data, error } = await supabase.rpc("iniciar_preparacion", {
+    p_usuario: usuario,
+    p_turno_id: turnoId,
+    p_numero_tanque: datos.numeroTanque,
+    p_sabor_id: datos.saborId,
+    p_lote: datos.lote,
+    p_tambores: datos.tambores,
+    p_agua: datos.agua,
+    p_azucar: datos.azucar,
+    p_acido_citrico: datos.acidoCitrico,
+    p_desvase_id: datos.desvaseId,
+    // Solo se manda si es para Vacío: así una preparación normal sigue andando aunque falte la migración 20261109490000.
+    ...(datos.paraVacio ? { p_para_vacio: true } : {}),
+  })
+
+  if (error || !data) {
+    return { ok: false, error: error?.message ?? "No se pudo iniciar la preparación. Intenta de nuevo." }
+  }
+
+  return { ok: true, data }
+}
+
+export async function liberarLote(usuario: string, turnoId: string, loteId: string): Promise<Resultado & { data?: unknown }> {
+  const { data, error } = await supabase.rpc("liberar_lote", {
+    p_usuario: usuario,
+    p_turno_id: turnoId,
+    p_lote_id: loteId,
+  })
+
+  if (error || !data) {
+    return { ok: false, error: error?.message ?? "No se pudo liberar el lote. Intenta de nuevo." }
+  }
+
+  return { ok: true, data }
+}
+
+/** El paso de revisión de Recepción: "así quedó heredado, confirmo que está bien". */
+export async function confirmarEstadoTanque(
+  usuario: string,
+  turnoId: string,
+  numeroTanque: 1 | 2 | 3,
+  momento: "INICIO" | "FIN",
+): Promise<Resultado & { data?: unknown }> {
+  const { data, error } = await supabase.rpc("confirmar_estado_tanque", {
+    p_usuario: usuario,
+    p_turno_id: turnoId,
+    p_numero_tanque: numeroTanque,
+    p_momento: momento,
+  })
+
+  if (error || !data) {
+    return { ok: false, error: "No se pudo confirmar el estado del tanque. Intenta de nuevo." }
+  }
+
+  return { ok: true, data }
+}

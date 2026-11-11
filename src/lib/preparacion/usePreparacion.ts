@@ -1,0 +1,307 @@
+/**
+ * usePreparacion() — hook del módulo Preparación. Ver
+ * docs/ARQUITECTURA.md (Opción A+C para la sesión de
+ * turno, confirmada en planta).
+ *
+ * NO depende del TurnoProvider viejo (src/lib/turno.ts) — solo de
+ * useSesionTurno() para saber turnoId/usuario. Busca su propia porción de
+ * datos llamando a turno_json() directo y quedándose solo con tanques y
+ * preparaciones — el mismo patrón que useProduccion() y
+ * useProductoTerminado() van a usar cuando se escriban (pasos 2 y 3).
+ *
+ * Repite la misma llamada a turno_json() que van a hacer los otros
+ * módulos (3 llamadas iguales en vez de 1) — costo de performance a
+ * optimizar después si hace falta, no un problema de arquitectura (ver
+ * discusión de la Fase 1).
+ */
+import { useCallback, useEffect, useState } from "react"
+import { useSesionTurno } from "@/lib/sesionTurno"
+import { supabase } from "@/lib/supabase"
+import {
+  ajustarPreparacion as ajustarPreparacionAccion,
+  cambiarCondicionTanque as cambiarCondicionTanqueAccion,
+  capturarRestoOrigenTransferencia as capturarRestoOrigenTransferenciaAccion,
+  desvasarTanque as desvasarTanqueAccion,
+  fijarVolumenLote as fijarVolumenLoteAccion,
+  medirTanque as medirTanqueAccion,
+  transferirTanque as transferirTanqueAccion,
+} from "./ajustes"
+import { confirmarEstadoTanque as confirmarEstadoTanqueAccion, iniciarPreparacion as iniciarPreparacionAccion, liberarLote as liberarLoteAccion } from "./nucleo"
+import { registrarAnalisisCalidad as registrarAnalisisCalidadAccion, type DatosAnalisisCalidad } from "@/lib/calidad"
+import {
+  mapearAjusteVolumen,
+  mapearDesvaseLote,
+  mapearPreparacion,
+  mapearSalidaVacio,
+  mapearTanque,
+  mapearTransferencia,
+  salidasComoDesvases,
+} from "./mapear"
+import { conTotales, leerTotalesLotes } from "./totalesLote"
+import {
+  entregarAVacio as entregarAVacioAccion,
+  pasarLoteAAseptico as pasarLoteAAsepticoAccion,
+  recibirDeVacio as recibirDeVacioAccion,
+} from "./vacio"
+import type {
+  AjusteVolumenRegistro,
+  DatosCambiarTanque,
+  DatosIniciarPreparacion,
+  DatosRecibirDeVacio,
+  DesvaseLoteRegistro,
+  FilaAjusteVolumen,
+  FilaDesvaseLote,
+  FilaPreparacion,
+  FilaSalidaVacio,
+  FilaTanque,
+  FilaTransferencia,
+  ModoTransferencia,
+  MotivoTransferencia,
+  PreparacionRegistro,
+  Resultado,
+  SalidaVacioRegistro,
+  TanqueRecepcion,
+  TransferenciaRegistro,
+} from "./tipos"
+
+interface FilaTurnoPreparacion {
+  tanques: FilaTanque[]
+  preparaciones: FilaPreparacion[]
+  transferencias: FilaTransferencia[]
+  desvases: FilaDesvaseLote[]
+  ajustes_volumen: FilaAjusteVolumen[]
+  /** Sin la migración 20261109490000 no viene. */
+  salidas_vacio?: FilaSalidaVacio[]
+}
+
+export interface UsePreparacionResultado {
+  tanques: TanqueRecepcion[]
+  preparaciones: PreparacionRegistro[]
+  /** Solo para alimentar el cálculo de merma (restar lo transferido del tramo de un lote) — no hay UI que liste esto todavía. */
+  transferencias: TransferenciaRegistro[]
+  /** Desvases a pipa + salidas a Vacío (salidasComoDesvases): todo lo que un lote entregó afuera. Solo para la merma. */
+  desvases: DesvaseLoteRegistro[]
+  /** Ajustes de volumen (sumar agua/jugo, botón "Ajustar") de este turno — alimenta el Acta de Entrega. */
+  ajustesVolumen: AjusteVolumenRegistro[]
+  /** Litros que Vacío se llevó en este turno — no son merma. */
+  salidasVacio: SalidaVacioRegistro[]
+  cargando: boolean
+  recargar: () => Promise<void>
+  iniciarPreparacion: (datos: DatosIniciarPreparacion) => Promise<Resultado>
+  /** Libera el lote (tanque LISTO). Solo en áreas sin «Calidad libera»; con él, libera registrarAnalisisCalidad. */
+  liberarLote: (loteId: string) => Promise<Resultado>
+  /** Calidad: guarda Brix/acidez/conformidad del lote; si es conforme, lo libera (tanque LISTO). */
+  registrarAnalisisCalidad: (loteId: string, datos: DatosAnalisisCalidad) => Promise<Resultado>
+  ajustarPreparacion: (loteId: string, litros: number, detalle: string | null) => Promise<Resultado>
+  /** Fija el volumen real del lote (100%) — mueve `volumen_l` Y `volumen_inicial_l`. Solo mientras ninguna corrida tomó del lote. */
+  fijarVolumenLote: (loteId: string, volumenReal: number) => Promise<Resultado>
+  transferirTanque: (
+    numeroTanqueOrigen: 1 | 2 | 3,
+    numeroTanqueDestino: 1 | 2 | 3,
+    modo: ModoTransferencia,
+    motivo: MotivoTransferencia,
+  ) => Promise<Resultado>
+  desvasarTanque: (numeroTanque: 1 | 2 | 3) => Promise<Resultado>
+  /** Relectura física: corrige `volumen_l` al valor medido — herramienta de excepción. */
+  medirTanque: (numeroTanque: 1 | 2 | 3, volumenReal: number) => Promise<Resultado>
+  /** Después de transferir: captura los litros que quedaron en el tanque origen (no quedó vacío). */
+  capturarRestoOrigenTransferencia: (numeroTanqueOrigen: 1 | 2 | 3, litrosResto: number) => Promise<Resultado>
+  confirmarEstadoTanque: (numeroTanque: 1 | 2 | 3, momento: "INICIO" | "FIN") => Promise<Resultado>
+  /** TODO (Fase 2 del plan): todavía hace CIP + confirmar INICIO/FIN — ver ajustes.ts. */
+  cambiarCondicionTanque: (datos: DatosCambiarTanque) => Promise<Resultado>
+  /** Vacío (ver vacio.ts). */
+  recibirDeVacio: (datos: DatosRecibirDeVacio) => Promise<Resultado>
+  entregarAVacio: (numeroTanque: 1 | 2 | 3, litros: number | null) => Promise<Resultado>
+  pasarLoteAAseptico: (numeroTanque: 1 | 2 | 3, volumenReal: number) => Promise<Resultado>
+}
+
+/**
+ * @param turnoIdElegido Tres casos: **omitido** (`undefined`) — usa el
+ * turno abierto del usuario logueado (páginas normales de trabajo).
+ * **string** — muestra ESE turno puntual (p. ej. Panel de Producción,
+ * mirando el turno de cualquier supervisor/fecha). **`null`** —
+ * explícitamente NINGÚN turno (p. ej. Panel todavía no resolvió cuál
+ * mostrar, o no hay ninguno para esa fecha/área): NO cae al turno propio
+ * del usuario logueado, muestra vacío. Esta distinción evita que un
+ * supervisor mirando el Panel de otra área/fecha vea, por un instante o
+ * por error, los datos de SU PROPIO turno en vez de nada.
+ * `usuario` sigue siendo siempre el que está logueado — mutar (si se
+ * llegara a hacer) queda atribuido a quien está mirando, no al usuario maestro
+ * original del turno.
+ */
+export function usePreparacion(turnoIdElegido?: string | null): UsePreparacionResultado {
+  const sesion = useSesionTurno()
+  const turnoId = turnoIdElegido === undefined ? sesion.turnoId : turnoIdElegido
+  const usuario = sesion.usuario
+
+  const [tanques, setTanques] = useState<TanqueRecepcion[]>([])
+  const [preparaciones, setPreparaciones] = useState<PreparacionRegistro[]>([])
+  const [transferencias, setTransferencias] = useState<TransferenciaRegistro[]>([])
+  const [desvases, setDesvases] = useState<DesvaseLoteRegistro[]>([])
+  const [ajustesVolumen, setAjustesVolumen] = useState<AjusteVolumenRegistro[]>([])
+  const [salidasVacio, setSalidasVacio] = useState<SalidaVacioRegistro[]>([])
+  const [cargando, setCargando] = useState(true)
+
+  function tomarDatos(fila: FilaTurnoPreparacion | null) {
+    setTanques(fila ? fila.tanques.map(mapearTanque) : [])
+    const preps = fila ? fila.preparaciones.map(mapearPreparacion) : []
+    // Conserva los totales ya leídos mientras llegan los nuevos (evita que la merma parpadee).
+    setPreparaciones((antes) => preps.map((p) => ({ ...p, totales: antes.find((a) => a.id === p.id)?.totales ?? null })))
+    // Totales de cada lote en todos los turnos, para el rendimiento (envasado / preparado).
+    if (preps.length > 0) {
+      void leerTotalesLotes(preps.map((p) => p.id)).then((totales) => setPreparaciones((actuales) => conTotales(actuales, totales)))
+    }
+    setTransferencias(fila ? fila.transferencias.map(mapearTransferencia) : [])
+    const salidas = fila ? (fila.salidas_vacio ?? []).map(mapearSalidaVacio) : []
+    setDesvases(fila ? [...fila.desvases.map(mapearDesvaseLote), ...salidasComoDesvases(salidas)] : [])
+    setAjustesVolumen(fila ? fila.ajustes_volumen.map(mapearAjusteVolumen) : [])
+    setSalidasVacio(salidas)
+  }
+
+  const recargar = useCallback(async () => {
+    if (!turnoId) {
+      tomarDatos(null)
+      setCargando(false)
+      return
+    }
+    setCargando(true)
+    const { data, error } = await supabase.rpc("turno_json", { p_turno_id: turnoId })
+    tomarDatos(!error && data ? (data as FilaTurnoPreparacion) : null)
+    setCargando(false)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [turnoId])
+
+  useEffect(() => {
+    recargar()
+  }, [recargar])
+
+  async function iniciarPreparacion(datos: DatosIniciarPreparacion): Promise<Resultado> {
+    if (!turnoId || !usuario) return { ok: false, error: "No hay un turno en curso." }
+    const resultado = await iniciarPreparacionAccion(usuario, turnoId, datos)
+    if (resultado.ok) tomarDatos(resultado.data as FilaTurnoPreparacion)
+    return resultado
+  }
+
+  async function liberarLote(loteId: string): Promise<Resultado> {
+    if (!turnoId || !usuario) return { ok: false, error: "No hay un turno en curso." }
+    const resultado = await liberarLoteAccion(usuario, turnoId, loteId)
+    if (resultado.ok) tomarDatos(resultado.data as FilaTurnoPreparacion)
+    return resultado
+  }
+
+  async function registrarAnalisisCalidad(loteId: string, datos: DatosAnalisisCalidad): Promise<Resultado> {
+    if (!turnoId || !usuario) return { ok: false, error: "No hay un turno en curso." }
+    const resultado = await registrarAnalisisCalidadAccion(usuario, turnoId, loteId, datos)
+    if (!resultado.ok) return resultado
+    tomarDatos(resultado.data as FilaTurnoPreparacion)
+    return { ok: true }
+  }
+
+  async function ajustarPreparacion(loteId: string, litros: number, detalle: string | null): Promise<Resultado> {
+    if (!turnoId || !usuario) return { ok: false, error: "No hay un turno en curso." }
+    const resultado = await ajustarPreparacionAccion(usuario, turnoId, loteId, litros, detalle)
+    if (resultado.ok) tomarDatos(resultado.data as FilaTurnoPreparacion)
+    return resultado
+  }
+
+  async function fijarVolumenLote(loteId: string, volumenReal: number): Promise<Resultado> {
+    if (!usuario) return { ok: false, error: "No hay un turno en curso." }
+    const resultado = await fijarVolumenLoteAccion(usuario, loteId, volumenReal)
+    if (resultado.ok) tomarDatos(resultado.data as FilaTurnoPreparacion)
+    return resultado
+  }
+
+  async function transferirTanque(
+    numeroTanqueOrigen: 1 | 2 | 3,
+    numeroTanqueDestino: 1 | 2 | 3,
+    modo: ModoTransferencia,
+    motivo: MotivoTransferencia,
+  ): Promise<Resultado> {
+    if (!turnoId || !usuario) return { ok: false, error: "No hay un turno en curso." }
+    const resultado = await transferirTanqueAccion(usuario, turnoId, numeroTanqueOrigen, numeroTanqueDestino, modo, motivo)
+    if (resultado.ok) tomarDatos(resultado.data as FilaTurnoPreparacion)
+    return resultado
+  }
+
+  async function desvasarTanque(numeroTanque: 1 | 2 | 3): Promise<Resultado> {
+    if (!turnoId || !usuario) return { ok: false, error: "No hay un turno en curso." }
+    const resultado = await desvasarTanqueAccion(usuario, turnoId, numeroTanque)
+    if (resultado.ok) tomarDatos(resultado.data as FilaTurnoPreparacion)
+    return resultado
+  }
+
+  async function medirTanque(numeroTanque: 1 | 2 | 3, volumenReal: number): Promise<Resultado> {
+    if (!turnoId || !usuario) return { ok: false, error: "No hay un turno en curso." }
+    const resultado = await medirTanqueAccion(usuario, turnoId, numeroTanque, volumenReal)
+    if (resultado.ok) tomarDatos(resultado.data as FilaTurnoPreparacion)
+    return resultado
+  }
+
+  async function capturarRestoOrigenTransferencia(numeroTanqueOrigen: 1 | 2 | 3, litrosResto: number): Promise<Resultado> {
+    if (!turnoId || !usuario) return { ok: false, error: "No hay un turno en curso." }
+    const resultado = await capturarRestoOrigenTransferenciaAccion(usuario, turnoId, numeroTanqueOrigen, litrosResto)
+    if (resultado.ok) tomarDatos(resultado.data as FilaTurnoPreparacion)
+    return resultado
+  }
+
+  async function confirmarEstadoTanque(numeroTanque: 1 | 2 | 3, momento: "INICIO" | "FIN"): Promise<Resultado> {
+    if (!turnoId || !usuario) return { ok: false, error: "No hay un turno en curso." }
+    const resultado = await confirmarEstadoTanqueAccion(usuario, turnoId, numeroTanque, momento)
+    if (resultado.ok) tomarDatos(resultado.data as FilaTurnoPreparacion)
+    return resultado
+  }
+
+  // TODO (Fase 2 del plan §2.1): todavía hace CIP + confirmar INICIO/FIN — ver la nota en ajustes.ts.
+  async function cambiarCondicionTanque(datos: DatosCambiarTanque): Promise<Resultado> {
+    if (!turnoId || !usuario) return { ok: false, error: "No hay un turno en curso." }
+    const resultado = await cambiarCondicionTanqueAccion(usuario, turnoId, datos)
+    if (resultado.ok) tomarDatos(resultado.data as FilaTurnoPreparacion)
+    return resultado
+  }
+
+  async function recibirDeVacio(datos: DatosRecibirDeVacio): Promise<Resultado> {
+    if (!turnoId || !usuario) return { ok: false, error: "No hay un turno en curso." }
+    const resultado = await recibirDeVacioAccion(usuario, turnoId, datos)
+    if (resultado.ok) tomarDatos(resultado.data as FilaTurnoPreparacion)
+    return resultado
+  }
+
+  async function entregarAVacio(numeroTanque: 1 | 2 | 3, litros: number | null): Promise<Resultado> {
+    if (!turnoId || !usuario) return { ok: false, error: "No hay un turno en curso." }
+    const resultado = await entregarAVacioAccion(usuario, turnoId, numeroTanque, litros)
+    if (resultado.ok) tomarDatos(resultado.data as FilaTurnoPreparacion)
+    return resultado
+  }
+
+  async function pasarLoteAAseptico(numeroTanque: 1 | 2 | 3, volumenReal: number): Promise<Resultado> {
+    if (!turnoId || !usuario) return { ok: false, error: "No hay un turno en curso." }
+    const resultado = await pasarLoteAAsepticoAccion(usuario, turnoId, numeroTanque, volumenReal)
+    if (resultado.ok) tomarDatos(resultado.data as FilaTurnoPreparacion)
+    return resultado
+  }
+
+  return {
+    tanques,
+    preparaciones,
+    transferencias,
+    desvases,
+    ajustesVolumen,
+    salidasVacio,
+    cargando,
+    recargar,
+    iniciarPreparacion,
+    liberarLote,
+    registrarAnalisisCalidad,
+    ajustarPreparacion,
+    fijarVolumenLote,
+    transferirTanque,
+    desvasarTanque,
+    medirTanque,
+    capturarRestoOrigenTransferencia,
+    confirmarEstadoTanque,
+    cambiarCondicionTanque,
+    recibirDeVacio,
+    entregarAVacio,
+    pasarLoteAAseptico,
+  }
+}

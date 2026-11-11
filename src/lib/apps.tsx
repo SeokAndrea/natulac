@@ -1,0 +1,440 @@
+import type { LucideIcon } from "lucide-react"
+import {
+  Warehouse,
+  PlayCircle,
+  PackageCheck,
+  ClipboardCheck,
+  DatabaseZap,
+  History,
+  Beaker,
+  Factory,
+  RadioTower,
+  CalendarRange,
+  Thermometer,
+  Wrench,
+  ShieldAlert,
+  FileText,
+  Calculator,
+  FlaskConical,
+  BookOpen,
+  Droplets,
+  Network,
+  Users,
+  ClipboardList,
+  Siren,
+  ListChecks,
+  BarChart3,
+  Boxes,
+} from "lucide-react"
+import type { Session } from "@/lib/auth"
+import type { AreaCodigo } from "@/lib/catalogos"
+import { esPermisoDeAdministracion, puede, type Permiso } from "@/lib/permisos"
+import { esSoloVista, PANELES_SOLO_VISTA } from "@/lib/rolVista"
+
+export interface AppDef {
+  slug: string
+  title: string
+  /** Opcional: los atajos del Inicio pueden ir sin descripción. */
+  description?: string
+  /** Sin href = todavía no tiene página propia (tarjeta deshabilitada, "Próximamente"). */
+  href?: string
+  icon: LucideIcon
+  /**
+   * Si es true, la tarjeta aparece bloqueada en el hub (gris, con
+   * candado, sin link) mientras no haya un turno en curso. Ver la
+   * lógica en Hub.tsx y el estado en src/lib/turno.ts.
+   */
+  requiereTurno: boolean
+  /**
+   * Si se define, la tarjeta (y su ruta, ver ProtectedRoute) solo es
+   * para quien tenga este permiso, o cualquiera de la lista (ver src/lib/permisos.ts). Sin esta
+   * propiedad, la ve cualquier sesión.
+   */
+  permiso?: Permiso | Permiso[]
+  /** Si se define, la tarjeta solo aparece para quien trabaja en estas áreas (Super Administrador, sin área, la ve igual). */
+  areasPermitidas?: AreaCodigo[]
+  /** Tarjeta en prueba: solo la ve el Área de Pruebas hasta que se apruebe (ej. Validar jornada). */
+  enPrueba?: boolean
+  /** Atajo chico junto al saludo del hub, en vez de la grilla principal (ver Hub.tsx). */
+  atajo?: boolean
+  /** Áreas que entran aunque no haya un turno en curso (Mantenimiento a Líneas, que no abre turnos). */
+  sinTurnoAreas?: string[]
+  /** Se bloquea (gris) cuando SÍ hay un turno en curso — lo opuesto de requiereTurno (ver Comenzar Turno). */
+  bloqueaConTurno?: boolean
+  /** Se resalta en rojo cuando hay un turno en curso, para que sea obvio el siguiente paso (ver Finalizar Turno). */
+  resaltarConTurno?: boolean
+  /** Con candado mientras el turno es una continuación recién abierta por el sistema (ver src/lib/continuidadTurno.ts). */
+  bloqueaEnContinuidad?: boolean
+  /** Color fijo del ícono/tarjeta (por defecto: primary) — para distinguir a simple vista pasos como Comenzar/Preparación/Finalizar. */
+  color?: "success" | "blue" | "purple" | "warning" | "danger"
+  /** Si es true, la tarjeta solo aparece para el usuario maestro (ver session.esDueno). */
+  soloDueno?: boolean
+  /** Si se define, la tarjeta solo aparece para ese username exacto (case-insensitive), sin importar rol o área — para vistas de prueba de un solo usuario. */
+  usuarioPermitido?: string
+  /**
+   * Grupo bajo el que aparece la tarjeta en la grilla principal del hub,
+   * con un separador y título arriba (ver Hub.tsx). Sin esta propiedad,
+   * la tarjeta va suelta, sin sección. "apoyo": tarjetas de las áreas de
+   * apoyo (Calidad, Servicios Industriales); para quien es de un área de
+   * apoyo, las de "produccion" que ve (ej. Reportes de paradas en
+   * Mantenimiento) también van ahí.
+   */
+  seccion?: "produccion" | "apoyo" | "auditoria" | "base-datos"
+}
+
+/*
+ * Listado de aplicaciones que aparecen como tarjetas en el hub (Hub.tsx).
+ * Para agregar una app nueva:
+ *   1. Sumar un objeto aquí con su slug, título, descripción, ruta (href)
+ *      e ícono (ver la lista completa en https://lucide.dev/icons), si
+ *      requiere o no un turno iniciado, y qué permiso pide (permiso,
+ *      opcional).
+ *   2. Crear la página en src/pages/apps/ y registrar esa misma ruta
+ *      (href) en src/App.tsx dentro de <Routes>, protegida con
+ *      <ProtectedRoute app="slug">: toma los mismos criterios de acá.
+ * No hace falta tocar Hub.tsx: la grilla se genera automáticamente a
+ * partir de este arreglo, filtrada por puedeVerApp().
+ */
+export const apps: AppDef[] = [
+  {
+    slug: "comenzar-turno",
+    title: "Comenzar Turno",
+    description: "Registra el inicio de tu turno de producción.",
+    href: "/turno",
+    icon: PlayCircle,
+    requiereTurno: false,
+    permiso: "TURNO_ASUMIR",
+    bloqueaConTurno: true,
+    color: "success",
+    seccion: "produccion",
+  },
+  {
+    slug: "preparacion",
+    title: "Preparación",
+    href: "/preparacion",
+    icon: Beaker,
+    requiereTurno: true,
+    permiso: "TURNO_CARGAR",
+    color: "blue",
+    seccion: "produccion",
+  },
+  {
+    slug: "calidad",
+    title: "Calidad",
+    description: "Analizar y liberar los lotes preparados: Brix, acidez y conformidad.",
+    href: "/calidad",
+    icon: FlaskConical,
+    requiereTurno: false,
+    permiso: "LOTE_LIBERAR",
+    // Fuera de la planta real: el módulo vive solo en Pruebas.
+    enPrueba: true,
+    color: "purple",
+    seccion: "apoyo",
+  },
+  {
+    slug: "inventario",
+    title: "Inventario diario",
+    description: "Materia prima y material de empaque: inventario de la mañana y de la tarde.",
+    href: "/inventario",
+    icon: Warehouse,
+    requiereTurno: false,
+    // Analista, Jefe y Supervisor (migración 20261112290000).
+    permiso: "INVENTARIO_CARGAR",
+    seccion: "produccion",
+  },
+  {
+    slug: "lineas",
+    title: "Líneas",
+    href: "/lineas",
+    icon: Factory,
+    requiereTurno: true,
+    // Mantenimiento entra a Líneas en Modo Paradas, sin abrir turno.
+    sinTurnoAreas: ["MANTENIMIENTO"],
+    permiso: ["TURNO_CARGAR", "PARADAS_MANTENIMIENTO"],
+    color: "blue",
+    seccion: "produccion",
+  },
+  {
+    slug: "producto-terminado",
+    title: "Producto Terminado y Contador",
+    description: "Carga los lotes de producto terminado y el contador de envases por línea.",
+    href: "/producto-terminado",
+    icon: PackageCheck,
+    requiereTurno: true,
+    permiso: "TURNO_CARGAR",
+    seccion: "produccion",
+  },
+  {
+    slug: "robot-tavil",
+    title: "Robot Tavil",
+    description: "Cuenta las paletas que salen del robot y el Resto de cada lote.",
+    href: "/robot-tavil",
+    icon: Boxes,
+    // El operador no abre turno: ve las líneas activas de la planta (migración 20261114690000).
+    requiereTurno: false,
+    permiso: "ROBOT_TAVIL_CARGAR",
+    seccion: "produccion",
+  },
+  {
+    slug: "finalizar-turno",
+    title: "Finalizar Turno",
+    href: "/finalizar-turno",
+    icon: ClipboardCheck,
+    requiereTurno: true,
+    permiso: "TURNO_ASUMIR",
+    resaltarConTurno: true,
+    bloqueaEnContinuidad: true,
+    seccion: "produccion",
+  },
+  {
+    slug: "resumen-dia",
+    title: "Resumen Diario",
+    href: "/resumen-dia",
+    icon: ClipboardList,
+    requiereTurno: false,
+    // Lo ven el jefe y la analista; solo la analista (VALIDAR) corrige el mensaje.
+    permiso: "RESUMEN_VER",
+    seccion: "auditoria",
+  },
+  {
+    slug: "validar-jornada",
+    title: "Validar jornada",
+    description: "Revisar el día (cajas, envases, semielaborado y paradas) y validarlo para los KPIs.",
+    href: "/validar-jornada",
+    icon: ListChecks,
+    requiereTurno: false,
+    permiso: "VALIDAR",
+    // En prueba (2026-10-12): solo el Área de Pruebas hasta que la Analista lo apruebe. Ver src/lib/validarJornada.ts.
+    enPrueba: true,
+    seccion: "auditoria",
+  },
+  {
+    slug: "mis-actas",
+    title: "Mis Actas",
+    href: "/mis-actas",
+    icon: FileText,
+    requiereTurno: false,
+    permiso: "TURNO_CARGAR",
+    seccion: "auditoria",
+  },
+  {
+    slug: "panel-produccion",
+    title: "Panel de Producción",
+    description: "Tanques, meta y merma del turno en curso — en vivo.",
+    href: "/panel-produccion",
+    icon: RadioTower,
+    requiereTurno: false,
+    atajo: true,
+  },
+  {
+    slug: "reportes-paradas",
+    title: "Reportes de paradas",
+    description: "Revisar las paradas y abrir su reporte para imprimir.",
+    href: "/reportes-paradas",
+    icon: Wrench,
+    requiereTurno: false,
+    // Solo revisar (parar, anotar y cubrir viven en Líneas, Modo Paradas). Lo decide el permiso del puesto.
+    permiso: "REPORTES_PARADAS_VER",
+    seccion: "produccion",
+  },
+  {
+    slug: "solicitudes-intervencion",
+    title: "Solicitudes de Intervención",
+    description: "Fallas repetidas para Mantenimiento.",
+    href: "/solicitudes-intervencion",
+    icon: Siren,
+    requiereTurno: false,
+    // Las genera el servidor (migración 20261109390000). Mantenimiento las gestiona (SIF_GESTIONAR); quien registra paradas o audita las ve.
+    permiso: ["SIF_GESTIONAR", "PARADAS_REGISTRAR", "PARADAS_MANTENIMIENTO", "AUDITORIA_VER"],
+    seccion: "produccion",
+  },
+  {
+    slug: "catalogo-paradas",
+    title: "Catálogo de Paradas",
+    description: "Fallas de equipos y otras paradas, con sus códigos.",
+    href: "/catalogo-paradas",
+    icon: Wrench,
+    requiereTurno: false,
+    // Ver: todos los roles (20261113590000). Agregar y cambiar: CATALOGO_PARADAS.
+    permiso: ["CATALOGO_PARADAS_VER", "CATALOGO_PARADAS"],
+    seccion: "base-datos",
+  },
+  {
+    slug: "codigos-mantenimiento",
+    title: "Códigos de Mantenimiento",
+    description: "Equipos y subsistemas de Mantenimiento.",
+    href: "/codigos-mantenimiento",
+    icon: ListChecks,
+    requiereTurno: false,
+    // Catálogo viejo de Mantenimiento: sus códigos quedaron como «código del Sheet» de cada subsistema. Solo el usuario maestro (2026-10-31); los puestos conservan CODIGOS_MTTO_EDITAR en la base.
+    permiso: "CODIGOS_MTTO_EDITAR",
+    soloDueno: true,
+    seccion: "base-datos",
+  },
+  {
+    slug: "panel-paradas",
+    title: "Panel de Paradas",
+    href: "/panel-paradas",
+    icon: RadioTower,
+    requiereTurno: false,
+    // Dashboard de solo lectura: visible para cualquier sesión, como el Panel de Producción.
+    atajo: true,
+  },
+  {
+    slug: "indicadores",
+    title: "Indicadores",
+    href: "/indicadores",
+    icon: BarChart3,
+    requiereTurno: false,
+    // Jefe, analista y el usuario maestro (2026-10-13). Desde 2026-11-06 con permiso propio (INDICADORES_VER), aparte del Resumen
+    // Diario: dar el Resumen (por ejemplo a Mantenimiento) ya no abre Indicadores. VALIDAR (la analista) lo sigue viendo.
+    permiso: ["INDICADORES_VER", "VALIDAR"],
+    // Atajo al lado del Panel de Paradas, en amarillo.
+    atajo: true,
+    color: "warning",
+  },
+  {
+    // Placeholder: sin href, el hub la muestra deshabilitada ("Próximamente").
+    slug: "manual",
+    title: "Manual",
+    description: "Manual de usuario de la aplicación.",
+    icon: BookOpen,
+    requiereTurno: false,
+    atajo: true,
+  },
+  {
+    slug: "programacion",
+    title: "Programación",
+    description: "Qué se planificó producir en la jornada, por sabor y en cajas.",
+    href: "/programacion",
+    icon: CalendarRange,
+    requiereTurno: false,
+    // Programación es de producción: la ve quien carga el turno o la edita (las áreas de apoyo no la necesitan).
+    permiso: ["TURNO_CARGAR", "PROGRAMACION_EDITAR"],
+    atajo: true,
+  },
+  {
+    slug: "servicios-industriales",
+    title: "Servicios Industriales",
+    description: "Cargar Temperatura del Quantum, Agua Osmotizada y Gasoil.",
+    href: "/servicios-industriales",
+    icon: Thermometer,
+    requiereTurno: false,
+    permiso: "LECTURAS_SI",
+    seccion: "apoyo",
+  },
+  {
+    slug: "registros-servicios-industriales",
+    title: "Registros del Área",
+    description: "Historial de Temperatura del Quantum, Agua Osmotizada y Gasoil cargados.",
+    href: "/registros-servicios-industriales",
+    icon: History,
+    requiereTurno: false,
+    permiso: "LECTURAS_SI",
+    seccion: "apoyo",
+  },
+  {
+    slug: "auditoria",
+    title: "Auditoría",
+    description: "Línea de tiempo.",
+    href: "/auditoria",
+    icon: History,
+    requiereTurno: false,
+    permiso: "AUDITORIA_VER",
+    color: "blue",
+    seccion: "auditoria",
+  },
+  {
+    slug: "calculadoras",
+    title: "Calculadoras",
+    description: "Fórmula de producto, bobina y conteo por peso.",
+    href: "/calculadoras",
+    icon: Calculator,
+    requiereTurno: false,
+    permiso: "CALCULADORAS",
+    // Ya no es atajo: arriba van solo los paneles, Indicadores, Manual y Programación.
+    seccion: "produccion",
+  },
+  {
+    slug: "personal",
+    title: "Personal",
+    description: "Altas, roles y permisos del personal.",
+    href: "/personal",
+    icon: Users,
+    permiso: ["PERSONAL_GESTIONAR", "ESTRUCTURA_GESTIONAR"],
+    requiereTurno: false,
+    seccion: "base-datos",
+  },
+  {
+    slug: "areas-puestos",
+    title: "Áreas y puestos",
+    description: "Áreas, puestos y qué puede hacer cada puesto.",
+    href: "/areas-puestos",
+    icon: Network,
+    permiso: "ESTRUCTURA_GESTIONAR",
+    requiereTurno: false,
+    seccion: "base-datos",
+  },
+  {
+    slug: "edicion-datos",
+    title: "Edición de Datos",
+    description: "Catálogos generales de la planta: sabores, presentaciones, líneas y más.",
+    href: "/edicion-datos",
+    icon: DatabaseZap,
+    requiereTurno: false,
+    permiso: "EDICION_DATOS",
+    seccion: "base-datos",
+  },
+  {
+    slug: "preparacion-plc",
+    title: "Contador de Agua",
+    description: "Litros, caudal y válvulas en vivo del PLC de Preparación.",
+    href: "/preparacion-plc",
+    icon: Droplets,
+    requiereTurno: false,
+    // Solo Producción Aséptico. Abrir/cerrar las
+    // válvulas auxiliares pide además el permiso VALVULA_AUX (en la página).
+    areasPermitidas: ["ASEPTICO"],
+    atajo: true,
+  },
+  {
+    slug: "errores",
+    title: "Errores",
+    description: "Errores que le salieron a alguien usando la app — quién, cuándo, qué intentaba hacer.",
+    href: "/errores",
+    icon: ShieldAlert,
+    requiereTurno: false,
+    soloDueno: true,
+    color: "danger",
+    seccion: "base-datos",
+  },
+]
+
+/** Una app por slug (tarjetas del hub). Las tres calculadoras viven dentro de "Calculadoras" (src/pages/apps/Calculadoras.tsx). */
+export function appPorSlug(slug: string): AppDef | undefined {
+  return apps.find((a) => a.slug === slug)
+}
+
+/**
+ * ¿Esta sesión puede ver/entrar a la app? Único criterio para el hub y
+ * para las rutas (ProtectedRoute). El Área de Pruebas entra a todo: es
+ * la cuenta de prueba y tiene que poder ejercitar cualquier pantalla.
+ */
+export function puedeVerApp(session: Session | null, app: AppDef): boolean {
+  if (!session) return false
+  // Solo Vista: los dos paneles y nada más, aunque esté en Pruebas.
+  if (esSoloVista(session)) return PANELES_SOLO_VISTA.some((p) => p.slug === app.slug)
+  // Pruebas entra a todo, salvo Personal y Áreas y puestos: esos los decide el permiso
+  // (el Probador no administra personas ni la estructura de la planta real).
+  if (session.area === "PRUEBAS") {
+    const permisos = app.permiso ? [app.permiso].flat() : []
+    if (permisos.length > 0 && permisos.every(esPermisoDeAdministracion)) return permisos.some((p) => puede(session, p))
+    return true
+  }
+  if (app.enPrueba) return false
+  if (app.permiso && ![app.permiso].flat().some((p) => puede(session, p))) return false
+  if (app.areasPermitidas && session.area && !app.areasPermitidas.includes(session.area)) return false
+  if (app.soloDueno && !session.esDueno) return false
+  if (app.usuarioPermitido && session.username.toLowerCase() !== app.usuarioPermitido.toLowerCase()) return false
+  return true
+}

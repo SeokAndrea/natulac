@@ -1,0 +1,360 @@
+/**
+ * Sesión de turno — NO es un módulo de dominio (no es Preparación, ni
+ * Producción, ni Producto Terminado). Es la pieza chica que los tres
+ * necesitan antes de poder buscar sus propios datos: "¿cuál turno estoy
+ * viendo, y quién soy?" — ver docs/ARQUITECTURA.md.
+ *
+ * Guarda solo identidad (turnoId, código, estado, usuario) — nunca tanques,
+ * líneas, contadores ni producto terminado. Cada módulo de dominio busca su
+ * propia porción de datos por separado, usando el turnoId de acá como
+ * clave (ver src/lib/preparacion/usePreparacion.ts).
+ *
+ * turno_activo_de() devuelve el mismo JSON completo que turno_json() (turno
+ * + tanques + líneas + PT) — acá se usa solo para leer id/código/estado,
+ * el resto de la respuesta se descarta a propósito.
+ */
+import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from "react"
+import type { GrupoCodigo, TurnoTipoCodigo } from "@/lib/catalogos"
+import { useAuth } from "@/lib/auth"
+import { saborSinFamiliaOculta } from "@/lib/turno"
+import type { CondicionTanque } from "@/lib/preparacion/tipos"
+import { supabase } from "@/lib/supabase"
+
+/** Foto de cómo estaba un tanque al empezar el turno (Status, revisión de INICIO) — se congela ahí, no cambia con el turno en curso. Se usa en el acta en PDF ("Condiciones encontradas" vs. "dejadas"). null = el turno se cerró sin completar esa revisión. */
+export interface TanqueEncontrado {
+  numeroTanque: 1 | 2 | 3
+  condicion: CondicionTanque
+  volumenL: number | null
+  saborNombre: string | null
+  lote: string | null
+}
+
+/**
+ * Último turno CERRADO del área, todavía dentro de los 30 min de gracia
+ * (turno_pt_gracia_de — ver migración 20261044090000). Solo lo usa
+ * ProductoTerminado.tsx cuando `turnoId` da null (el turno ya cerró):
+ * evita que un supervisor ansioso que finalizó el turno le tape a otro
+ * la carga de su Producto Terminado. NINGUNA otra pantalla debe usar
+ * esto para reabrir edición — Preparación/Producción siguen exigiendo
+ * `estado === "ABIERTO"` como siempre.
+ */
+export interface TurnoGraciaPT {
+  turnoId: string
+  codigo: string
+}
+
+/** Quién estuvo a cargo del turno y desde/hasta cuándo (asumir, relevos). Ver migración 20261080090000. */
+export interface ResponsableTurno {
+  usuario: string
+  nombre: string
+  motivo: "INICIO" | "ASUMIR" | "RELEVO"
+  desde: string
+  hasta: string | null
+}
+
+export type EsquemaTurnos = "3x8" | "12x12"
+
+export interface SesionTurno {
+  turnoId: string | null
+  codigo: string | null
+  estado: "ABIERTO" | "CERRADO" | null
+  turnoGraciaPT: TurnoGraciaPT | null
+  /** Cabecera del turno — no es dato de dominio (eso lo tienen los 3 módulos), pero tampoco es solo identidad: es lo que describe AL turno como tal. null si no hay turno. */
+  fecha: string | null
+  horaInicio: string | null
+  fechaFin: string | null
+  horaFin: string | null
+  turnoTipo: TurnoTipoCodigo | null
+  grupo: GrupoCodigo | null
+  supervisorUsuario: string | null
+  supervisorNombre: string | null
+  /** El respaldo lo abrió solo y nadie lo asumió todavía (supervisor = "Sin responsable"). */
+  sinResponsable: boolean
+  /** Turno abierto por el respaldo: falta elegir el grupo al asumirlo. */
+  grupoPendiente: boolean
+  /** Lo abrió el sistema (respaldo, continuidad 12x12 de las 22:30, relevo temprano), no el supervisor. Ver src/lib/continuidadTurno.ts. */
+  aperturaAutomatica: boolean
+  esquema: EsquemaTurnos | null
+  responsables: ResponsableTurno[]
+  tanquesEncontrados: TanqueEncontrado[] | null
+  usuario: string | null
+  cargando: boolean
+  iniciarTurno: (turnoTipo: TurnoTipoCodigo, grupo: GrupoCodigo) => Promise<{ ok: true } | { ok: false; error: string }>
+  finalizarTurno: () => Promise<{ ok: true } | { ok: false; error: string }>
+  /** Asumir el turno abierto (sin responsable) o tomar el relevo de otro. El grupo solo se pide si está pendiente. */
+  asumirTurno: (grupo: GrupoCodigo | null) => Promise<{ ok: true } | { ok: false; error: string }>
+  /** Cambia el grupo del turno abierto (si ese día no se cumplió la rotación). Solo el responsable o quien corrige turnos. */
+  cambiarGrupo: (grupo: GrupoCodigo) => Promise<{ ok: true } | { ok: false; error: string }>
+  /** Vuelve a leer el turno abierto sin mostrar la pantalla de carga (ej. después de prender el 12x12). */
+  refrescar: () => Promise<void>
+}
+
+interface FilaTanqueEncontrado {
+  numero_tanque: 1 | 2 | 3
+  condicion: CondicionTanque
+  volumen_l: number | null
+  sabor_nombre: string | null
+  lote: string | null
+}
+
+interface FilaTurnoIdentidad {
+  id: string
+  codigo: string
+  estado: "ABIERTO" | "CERRADO"
+  fecha: string
+  hora_inicio: string
+  fecha_fin: string | null
+  hora_fin: string | null
+  turno_tipo_codigo: TurnoTipoCodigo
+  grupo_codigo: GrupoCodigo
+  supervisor_usuario: string
+  supervisor_nombre: string
+  sin_responsable?: boolean
+  grupo_pendiente?: boolean
+  apertura_automatica?: boolean
+  esquema?: EsquemaTurnos
+  responsables?: ResponsableTurno[]
+  tanques_encontrados: FilaTanqueEncontrado[] | null
+}
+
+const SesionTurnoContext = createContext<SesionTurno | undefined>(undefined)
+
+export function SesionTurnoProvider({ children }: { children: ReactNode }) {
+  const { session } = useAuth()
+  const usuario = session?.username ?? null
+
+  const [turnoId, setTurnoId] = useState<string | null>(null)
+  const [codigo, setCodigo] = useState<string | null>(null)
+  const [estado, setEstado] = useState<"ABIERTO" | "CERRADO" | null>(null)
+  const [fecha, setFecha] = useState<string | null>(null)
+  const [horaInicio, setHoraInicio] = useState<string | null>(null)
+  const [fechaFin, setFechaFin] = useState<string | null>(null)
+  const [horaFin, setHoraFin] = useState<string | null>(null)
+  const [turnoTipo, setTurnoTipo] = useState<TurnoTipoCodigo | null>(null)
+  const [grupo, setGrupo] = useState<GrupoCodigo | null>(null)
+  const [supervisorUsuario, setSupervisorUsuario] = useState<string | null>(null)
+  const [supervisorNombre, setSupervisorNombre] = useState<string | null>(null)
+  const [sinResponsable, setSinResponsable] = useState(false)
+  const [grupoPendiente, setGrupoPendiente] = useState(false)
+  const [aperturaAutomatica, setAperturaAutomatica] = useState(false)
+  const [esquema, setEsquema] = useState<EsquemaTurnos | null>(null)
+  const [responsables, setResponsables] = useState<ResponsableTurno[]>([])
+  const [tanquesEncontrados, setTanquesEncontrados] = useState<TanqueEncontrado[] | null>(null)
+  const [turnoGraciaPT, setTurnoGraciaPT] = useState<TurnoGraciaPT | null>(null)
+  const [cargando, setCargando] = useState(true)
+
+  function tomarIdentidad(fila: FilaTurnoIdentidad | null) {
+    setTurnoId(fila?.id ?? null)
+    setCodigo(fila?.codigo ?? null)
+    setEstado(fila?.estado ?? null)
+    setFecha(fila?.fecha ?? null)
+    setHoraInicio(fila?.hora_inicio ?? null)
+    setFechaFin(fila?.fecha_fin ?? null)
+    setHoraFin(fila?.hora_fin ?? null)
+    setTurnoTipo(fila?.turno_tipo_codigo ?? null)
+    setGrupo(fila?.grupo_codigo ?? null)
+    setSupervisorUsuario(fila?.supervisor_usuario ?? null)
+    setSupervisorNombre(fila?.supervisor_nombre ?? null)
+    setSinResponsable(fila?.sin_responsable ?? false)
+    setGrupoPendiente(fila?.grupo_pendiente ?? false)
+    setAperturaAutomatica(fila?.apertura_automatica ?? false)
+    setEsquema(fila?.esquema ?? null)
+    setResponsables(fila?.responsables ?? [])
+    setTanquesEncontrados(
+      fila?.tanques_encontrados
+        ? fila.tanques_encontrados.map((t) => ({
+            numeroTanque: t.numero_tanque,
+            condicion: t.condicion,
+            volumenL: t.volumen_l,
+            saborNombre: saborSinFamiliaOculta(t.sabor_nombre),
+            lote: t.lote,
+          }))
+        : null,
+    )
+  }
+
+  /** Ver TurnoGraciaPT. */
+  async function cargarGraciaPT(u: string) {
+    const { data, error } = await supabase.rpc("turno_pt_gracia_de", { p_usuario: u })
+    if (error || !data) {
+      setTurnoGraciaPT(null)
+      return
+    }
+    const fila = data as FilaTurnoIdentidad
+    setTurnoGraciaPT({ turnoId: fila.id, codigo: fila.codigo })
+  }
+
+  async function recargar(u: string) {
+    setCargando(true)
+    const { data, error } = await supabase.rpc("turno_activo_de", { p_usuario: u })
+    const activo = !error && data ? (data as FilaTurnoIdentidad) : null
+    tomarIdentidad(activo)
+    // Siempre, aunque haya turno abierto: el turno es por área, así que el
+    // siguiente puede haber abierto el suyo mientras el anterior sigue en gracia.
+    await cargarGraciaPT(u)
+    setCargando(false)
+  }
+
+  useEffect(() => {
+    if (!usuario) {
+      tomarIdentidad(null)
+      setCargando(false)
+      return
+    }
+    recargar(usuario)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [usuario])
+
+  // El servidor cambia el turno solo (continuidad 12x12 de las 22:30,
+  // respaldo de las 7:30). Sin esto la pantalla seguía en el turno ya
+  // cerrado hasta recargar: el 19/10 un supervisor creyó seguir en el T2.
+  const turnoIdRef = useRef<string | null>(null)
+  turnoIdRef.current = turnoId
+  useEffect(() => {
+    if (!usuario) return
+    const u = usuario
+    async function revisar() {
+      if (document.visibilityState !== "visible") return
+      const { data, error } = await supabase.rpc("turno_activo_de", { p_usuario: u })
+      if (error) return
+      const activo = data ? (data as FilaTurnoIdentidad) : null
+      if ((activo?.id ?? null) === turnoIdRef.current) return
+      tomarIdentidad(activo)
+      await cargarGraciaPT(u)
+    }
+    const intervalo = window.setInterval(revisar, 60_000)
+    document.addEventListener("visibilitychange", revisar)
+    return () => {
+      window.clearInterval(intervalo)
+      document.removeEventListener("visibilitychange", revisar)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [usuario])
+
+  async function iniciarTurno(turnoTipo: TurnoTipoCodigo, grupo: GrupoCodigo) {
+    if (!usuario) {
+      return { ok: false as const, error: "No se pudo identificar el área del usuario." }
+    }
+    // SUPERADMINISTRADOR no tiene área fija (session.area null) — hoy
+    // todos los Super Admin son de Aséptico.
+    const areaCodigo = session?.area ?? "ASEPTICO"
+
+    const { data, error } = await supabase.rpc("iniciar_turno", {
+      p_usuario: usuario,
+      p_area_codigo: areaCodigo,
+      p_turno_tipo_codigo: turnoTipo,
+      p_grupo_codigo: grupo,
+    })
+
+    if (error || !data) {
+      return { ok: false as const, error: error?.message || "No se pudo iniciar el turno. Intenta de nuevo." }
+    }
+
+    tomarIdentidad(data as FilaTurnoIdentidad)
+    return { ok: true as const }
+  }
+
+  async function refrescar() {
+    if (!usuario) return
+    const { data, error } = await supabase.rpc("turno_activo_de", { p_usuario: usuario })
+    if (!error) tomarIdentidad(data ? (data as FilaTurnoIdentidad) : null)
+  }
+
+  async function asumirTurno(grupoElegido: GrupoCodigo | null) {
+    if (!usuario || !turnoId) {
+      return { ok: false as const, error: "No hay un turno abierto para asumir." }
+    }
+    const { data, error } = await supabase.rpc("asumir_turno", {
+      p_usuario: usuario,
+      p_turno_id: turnoId,
+      p_grupo_codigo: grupoElegido,
+    })
+    if (error || !data) {
+      return { ok: false as const, error: error?.message || "No se pudo asumir el turno. Intenta de nuevo." }
+    }
+    tomarIdentidad(data as FilaTurnoIdentidad)
+    return { ok: true as const }
+  }
+
+  async function cambiarGrupo(grupoElegido: GrupoCodigo) {
+    if (!usuario || !turnoId) {
+      return { ok: false as const, error: "No hay un turno abierto." }
+    }
+    const { data, error } = await supabase.rpc("cambiar_grupo_turno", {
+      p_usuario: usuario,
+      p_turno_id: turnoId,
+      p_grupo_codigo: grupoElegido,
+    })
+    if (error || !data) {
+      return { ok: false as const, error: error?.message || "No se pudo cambiar el grupo. Intenta de nuevo." }
+    }
+    tomarIdentidad(data as FilaTurnoIdentidad)
+    return { ok: true as const }
+  }
+
+  async function finalizarTurno() {
+    if (!turnoId) {
+      return { ok: false as const, error: "No hay un turno en curso." }
+    }
+    // El chequeo de "no cerrar con una corrida en ESPERANDO_PT" vive en la
+    // RPC finalizar_turno (migración 20261018090000, costura 2). Acá solo
+    // se propaga el mensaje.
+    // Quién finaliza lo valida el servidor (migración 20261083): el responsable, un jefe o el usuario maestro.
+    let error = (await supabase.rpc("finalizar_turno", { p_usuario: usuario, p_turno_id: turnoId })).error
+    // Base todavía sin la 20261083 (la app se publicó antes del db push): la versión vieja, sin usuario.
+    if (error?.code === "PGRST202") {
+      error = (await supabase.rpc("finalizar_turno", { p_turno_id: turnoId })).error
+    }
+
+    if (error) {
+      return { ok: false as const, error: error.message || "No se pudo finalizar el turno. Intenta de nuevo." }
+    }
+
+    tomarIdentidad(null)
+    // El turno recién cerrado entra directo en su ventana de gracia
+    // (ver TurnoGraciaPT) — sin esto, quien sigue en la pantalla de
+    // Producto Terminado tendría que refrescar para que aparezca.
+    if (usuario) await cargarGraciaPT(usuario)
+    return { ok: true as const }
+  }
+
+  return (
+    <SesionTurnoContext.Provider
+      value={{
+        turnoId,
+        codigo,
+        estado,
+        fecha,
+        horaInicio,
+        fechaFin,
+        horaFin,
+        turnoTipo,
+        grupo,
+        supervisorUsuario,
+        supervisorNombre,
+        sinResponsable,
+        grupoPendiente,
+        aperturaAutomatica,
+        esquema,
+        responsables,
+        tanquesEncontrados,
+        turnoGraciaPT,
+        usuario,
+        cargando,
+        iniciarTurno,
+        finalizarTurno,
+        asumirTurno,
+        cambiarGrupo,
+        refrescar,
+      }}
+    >
+      {children}
+    </SesionTurnoContext.Provider>
+  )
+}
+
+export function useSesionTurno(): SesionTurno {
+  const ctx = useContext(SesionTurnoContext)
+  if (!ctx) throw new Error("useSesionTurno debe usarse dentro de SesionTurnoProvider")
+  return ctx
+}

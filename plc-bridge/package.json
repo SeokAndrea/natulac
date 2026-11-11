@@ -1,0 +1,15 @@
+{
+  "name": "plc-bridge",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Puente entre el PLC de Preparacion (llenado de tanques por flujometro) y el dashboard, via WebSocket en tiempo real.",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js"
+  },
+  "dependencies": {
+    "nodes7": "^0.3.18",
+    "ws": "^8.18.0"
+  }
+}

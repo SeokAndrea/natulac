@@ -1,0 +1,238 @@
+import { useState } from "react"
+import { Check, CheckCircle2, Loader2, PenLine } from "lucide-react"
+import { Badge } from "@/components/ui/badge"
+import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
+import { nombrePresentacion, type ItemDia } from "@/lib/resumenDia"
+
+type Resultado = { ok: true } | { ok: false; error: string }
+const miles = (n: number) => n.toLocaleString("es-CO")
+
+/**
+ * Un sabor + presentación (de un turno, si viene `etiqueta`): sus cajas, el
+ * estado y Confirmar / Corregir el total. Al corregir también se puede cambiar la presentación
+ * (ej. se cargó como 250 y era 200): las cajas pasan a la otra fila.
+ */
+export function ItemValidar({
+  item: i,
+  etiqueta,
+  volumenes,
+  cajasXPaleta,
+  guardar,
+  moverA,
+  onCambio,
+}: {
+  item: ItemDia
+  /** Turno al que pertenece (ej. "T1 · Supervisor Uno"). */
+  etiqueta?: string
+  /** Presentaciones que se pueden elegir (ml). */
+  volumenes: number[]
+  /** Cajas que trae una paleta por presentación (ml → cajas). Sin dato, solo se captura en cajas. */
+  cajasXPaleta?: Record<number, number>
+  guardar: (cajas: number | null, nota: string) => Promise<Resultado>
+  /** Pasa `cajas` a la presentación `volumenMl` (esta fila queda en 0). */
+  moverA: (volumenMl: number, cajas: number, nota: string) => Promise<Resultado>
+  onCambio: () => void
+}) {
+  const [editando, setEditando] = useState(false)
+  const [cajas, setCajas] = useState(String(i.cajasOficiales))
+  const [volumen, setVolumen] = useState(i.volumenMl)
+  const [nota, setNota] = useState(i.nota ?? "")
+  const [enviando, setEnviando] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [enPaletas, setEnPaletas] = useState(true)
+  const [paletas, setPaletas] = useState("")
+  const [sueltas, setSueltas] = useState("")
+  const cxp = cajasXPaleta?.[volumen] ?? 0
+  // Con paletas, el total sale de paletas × cajas por paleta + sueltas (la presentación elegida manda).
+  const porPaletas = enPaletas && cxp > 0
+  const nPaletas = Number(paletas)
+  const nSueltas = Number(sueltas)
+  const validoPaletas =
+    paletas !== "" && sueltas !== "" && Number.isInteger(nPaletas) && Number.isInteger(nSueltas) && nPaletas >= 0 && nSueltas >= 0
+  const nCajas = porPaletas ? nPaletas * cxp + nSueltas : Number(cajas)
+  const valido = porPaletas ? validoPaletas : cajas !== "" && Number.isInteger(nCajas) && nCajas >= 0
+  const cambiaPresentacion = volumen !== i.volumenMl
+
+  /** Parte un total de cajas en paletas completas + sueltas para la presentación dada. */
+  function repartir(total: number, porPaleta: number) {
+    if (porPaleta <= 0) return
+    setPaletas(String(Math.floor(total / porPaleta)))
+    setSueltas(String(total % porPaleta))
+  }
+
+  async function ejecutar(accion: () => Promise<Resultado>) {
+    setEnviando(true)
+    setError(null)
+    const r = await accion()
+    setEnviando(false)
+    if (!r.ok) {
+      setError(r.error)
+      return
+    }
+    setEditando(false)
+    onCambio()
+  }
+
+  const opciones = [...new Set([i.volumenMl, ...volumenes])].sort((a, b) => b - a)
+
+  return (
+    <div className="flex flex-col gap-2 rounded-lg border border-border p-3">
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          {etiqueta && <p className="text-xs font-semibold text-muted-foreground">{etiqueta}</p>}
+          <p className="text-sm font-semibold text-foreground">{i.saborNombre}</p>
+          <p className="text-xs text-muted-foreground">{nombrePresentacion(i.volumenMl)}</p>
+        </div>
+        <div className="flex shrink-0 flex-col items-end gap-1">
+          <span className="num text-base font-bold text-foreground">{miles(i.cajasOficiales)} cajas</span>
+          {i.estado === "CONFIRMADO" ? (
+            <Badge>Confirmado</Badge>
+          ) : i.estado === "EDITADO" ? (
+            <Badge variant="secondary">Corregido</Badge>
+          ) : (
+            <Badge variant="outline">Pendiente</Badge>
+          )}
+        </div>
+      </div>
+
+      {i.estado === "EDITADO" && (
+        <p className="text-xs text-muted-foreground">
+          Supervisor: <span className="num">{miles(i.cajasSupervisor)}</span> cajas
+        </p>
+      )}
+      {i.estado !== "PENDIENTE" && i.validadoPorNombre && (
+        <p className="text-xs text-muted-foreground">
+          {i.estado === "EDITADO" ? "Corrigió" : "Confirmó"} {i.validadoPorNombre}
+          {i.nota ? ` — ${i.nota}` : ""}
+        </p>
+      )}
+
+      {editando ? (
+        <div className="flex flex-col gap-2 rounded-md border border-dashed border-border p-2">
+          <div className="flex flex-wrap gap-3">
+            {porPaletas ? (
+              <>
+                <label className="flex flex-col gap-1">
+                  <span className="text-xs text-muted-foreground">Paletas</span>
+                  <Input type="number" inputMode="numeric" min={0} value={paletas} onChange={(e) => setPaletas(e.target.value)} className="h-8 w-28" />
+                </label>
+                <label className="flex flex-col gap-1">
+                  <span className="text-xs text-muted-foreground">Cajas sueltas</span>
+                  <Input type="number" inputMode="numeric" min={0} value={sueltas} onChange={(e) => setSueltas(e.target.value)} className="h-8 w-28" />
+                </label>
+              </>
+            ) : (
+              <label className="flex flex-col gap-1">
+                <span className="text-xs text-muted-foreground">Total de cajas</span>
+                <Input type="number" inputMode="numeric" min={0} value={cajas} onChange={(e) => setCajas(e.target.value)} className="h-8 w-32" />
+              </label>
+            )}
+            <label className="flex flex-col gap-1">
+              <span className="text-xs text-muted-foreground">Presentación</span>
+              <select
+                value={volumen}
+                onChange={(e) => {
+                  const v = Number(e.target.value)
+                  // Si ya hay paletas capturadas, se conserva el total y se reparte con las cajas por paleta de la nueva presentación.
+                  if (porPaletas && validoPaletas) {
+                    const nuevo = cajasXPaleta?.[v] ?? 0
+                    if (nuevo > 0) repartir(nCajas, nuevo)
+                    else {
+                      setCajas(String(nCajas))
+                      setEnPaletas(false)
+                    }
+                  }
+                  setVolumen(v)
+                }}
+                className="h-8 rounded-md border border-input bg-transparent px-2 text-sm"
+              >
+                {opciones.map((v) => (
+                  <option key={v} value={v}>
+                    {v} ml
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+          {porPaletas && (
+            <p className="text-xs text-muted-foreground">
+              {nombrePresentacion(volumen)}: {cxp} cajas por paleta. Total: <span className="num font-semibold">{valido ? miles(nCajas) : "—"}</span> cajas.
+            </p>
+          )}
+          {cxp > 0 && (
+            <button
+              type="button"
+              className="self-start text-xs text-primary underline"
+              onClick={() => {
+                if (porPaletas) {
+                  if (valido) setCajas(String(nCajas))
+                  setEnPaletas(false)
+                } else {
+                  if (cajas !== "" && Number.isInteger(nCajas) && nCajas >= 0) repartir(nCajas, cxp)
+                  else {
+                    setPaletas("")
+                    setSueltas("")
+                  }
+                  setEnPaletas(true)
+                }
+              }}
+            >
+              {porPaletas ? "Poner el total en cajas" : "Poner en paletas"}
+            </button>
+          )}
+          {cambiaPresentacion && (
+            <p className="text-xs text-muted-foreground">
+              Las {valido ? miles(nCajas) : "—"} cajas pasan a {i.saborNombre} {volumen} ml y esta fila queda en 0.
+            </p>
+          )}
+          <Input placeholder="Nota (opcional)" value={nota} onChange={(e) => setNota(e.target.value)} className="h-8" />
+          <div className="flex flex-wrap gap-2">
+            <Button
+              size="sm"
+              disabled={!valido || enviando}
+              onClick={() => ejecutar(() => (cambiaPresentacion ? moverA(volumen, nCajas, nota) : guardar(nCajas, nota)))}
+            >
+              {enviando ? <Loader2 className="size-3.5 animate-spin" /> : <Check className="size-3.5" />}
+              {cambiaPresentacion ? `Pasar a ${volumen} ml` : "Guardar corrección"}
+            </Button>
+            <Button size="sm" variant="ghost" disabled={enviando} onClick={() => setEditando(false)}>
+              Cancelar
+            </Button>
+          </div>
+        </div>
+      ) : (
+        <div className="flex flex-wrap gap-2">
+          {i.estado !== "CONFIRMADO" && (
+            <Button size="sm" variant="outline" disabled={enviando} onClick={() => ejecutar(() => guardar(null, ""))}>
+              {enviando ? <Loader2 className="size-3.5 animate-spin" /> : <CheckCircle2 className="size-3.5" />}
+              {i.estado === "EDITADO" ? "Volver a lo del supervisor" : "Confirmar"}
+            </Button>
+          )}
+          <Button
+            size="sm"
+            variant="ghost"
+            disabled={enviando}
+            onClick={() => {
+              setCajas(String(i.cajasOficiales))
+              setEnPaletas(true)
+              const porPaleta = cajasXPaleta?.[i.volumenMl] ?? 0
+              if (porPaleta > 0) repartir(i.cajasOficiales, porPaleta)
+              setVolumen(i.volumenMl)
+              setNota(i.nota ?? "")
+              setEditando(true)
+            }}
+          >
+            <PenLine className="size-3.5" />
+            Corregir
+          </Button>
+        </div>
+      )}
+      {error && (
+        <p className="text-xs text-destructive" role="alert">
+          {error}
+        </p>
+      )}
+    </div>
+  )
+}

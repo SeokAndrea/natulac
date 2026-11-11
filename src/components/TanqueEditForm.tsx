@@ -1,0 +1,196 @@
+import { useState } from "react"
+import { Loader2 } from "lucide-react"
+import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
+import { nombreSaborConFamilia, unidadPreparacion, type Sabor } from "@/lib/sabores"
+import type { CondicionTanque, DatosCambiarTanque, TanqueRecepcion } from "@/lib/preparacion/tipos"
+
+type Resultado = { ok: true } | { ok: false; error: string }
+
+/** Los lotes son 4 dígitos (0001, 0002...) — si escriben solo el número (ej. "3"), se completa con ceros a la izquierda. */
+function normalizarLote(valor: string): string {
+  const recortado = valor.trim()
+  return /^\d+$/.test(recortado) ? recortado.padStart(4, "0") : recortado
+}
+
+/**
+ * Formulario para cambiar la condición de un tanque — compartido
+ * entre Preparación (donde se abre/cierra con un botón "Cambiar
+ * estado") y el paso 2 de Comenzar Turno (donde se muestra siempre
+ * abierto, para revisar/confirmar los 3 tanques al arrancar el
+ * turno). La lógica es la misma en los dos lados: es estado continuo,
+ * cambiarlo acá es lo mismo que cambiarlo en Preparación.
+ */
+export function TanqueEditForm({
+  tanque,
+  sabores,
+  onGuardar,
+  onCancelar,
+  guardarTexto = "Guardar",
+  sinVolumen = false,
+  calidadLibera = false,
+}: {
+  tanque: TanqueRecepcion
+  sabores: Sabor[]
+  onGuardar: (datos: DatosCambiarTanque) => Promise<Resultado>
+  onCancelar?: () => void
+  guardarTexto?: string
+  /** Oculta el campo Volumen para un tanque Listo/Con restos: los litros se corrigen con "Medir tanque". El volumen actual se manda sin cambios. */
+  sinVolumen?: boolean
+  /**
+   * Calidad libera en el área (areas.calidad_libera): Listo / Con restos solo
+   * para el lote que el tanque ya tiene liberado, con sabor y lote fijos. Un
+   * lote nuevo se deja En Preparación y lo libera Calidad (migración 20261095).
+   */
+  calidadLibera?: boolean | null
+}) {
+  const yaLiberado = tanque.condicion === "LISTO" || tanque.condicion === "STANDBY"
+  const loteFijo = calidadLibera === true
+  const [condicion, setCondicion] = useState<CondicionTanque>(tanque.condicion)
+  const [saborId, setSaborId] = useState(tanque.saborId ?? "")
+  const [volumenL, setVolumenL] = useState(tanque.volumenL !== null ? String(tanque.volumenL) : "")
+  const [tambores, setTambores] = useState("")
+  const [lote, setLote] = useState(tanque.lote ?? "")
+  const [guardando, setGuardando] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  /** Listo y Standby (resto del lote) piden sabor/volumen/lote. */
+  const requiereDatos = condicion === "LISTO" || condicion === "STANDBY"
+  /** Con Calidad, el sabor y el lote de un Listo / Con restos no se cambian desde acá. */
+  const datosFijos = loteFijo && requiereDatos
+  /*
+   * "En Preparación (no liberado)" también permite cargar la
+   * preparación (sabor + tambores + lote) sin liberarla — igual que
+   * Iniciar Preparación; el volumen sale de tambores × volumen del
+   * sabor. Es opcional: se puede dejar el tanque En Preparación sin
+   * datos (los 3 campos vacíos).
+   */
+  const esPrepConDatos = condicion === "EN_PREPARACION" && (saborId !== "" || tambores !== "" || lote.trim() !== "")
+  const saborElegido = sabores.find((s) => s.id === saborId) ?? null
+  const unidadPrep = unidadPreparacion(saborElegido ? `${saborElegido.nombre} ${saborElegido.familiaNombre}` : null)
+  const volumenDeTambores =
+    saborElegido?.volumen && tambores !== "" ? Math.round(Number(tambores) * saborElegido.volumen) : null
+
+  const datosValidos =
+    (!requiereDatos && !esPrepConDatos) ||
+    (requiereDatos &&
+      saborId !== "" &&
+      (sinVolumen || (volumenL !== "" && Number(volumenL) > 0 && Number(volumenL) <= 20000)) &&
+      lote.trim() !== "") ||
+    (esPrepConDatos && saborId !== "" && tambores !== "" && Number(tambores) > 0 && lote.trim() !== "")
+
+  async function guardar() {
+    if (!datosValidos) return
+    setGuardando(true)
+    setError(null)
+    const resultado = await onGuardar({
+      numeroTanque: tanque.numeroTanque,
+      condicion,
+      saborId: datosFijos ? tanque.saborId : requiereDatos || esPrepConDatos ? saborId : null,
+      volumenL: requiereDatos ? Number(volumenL) || (tanque.volumenL ?? 0) : null,
+      tambores: esPrepConDatos ? Number(tambores) : null,
+      lote: datosFijos ? tanque.lote : requiereDatos || esPrepConDatos ? normalizarLote(lote) : null,
+    })
+    setGuardando(false)
+    if (!resultado.ok) {
+      setError(resultado.error)
+    }
+  }
+
+  return (
+    <div className="flex flex-col gap-2 rounded-lg border border-dashed border-border p-3">
+      <Select value={condicion} onValueChange={(v) => setCondicion(v as CondicionTanque)}>
+        <SelectTrigger className="w-full">
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          {(!loteFijo || yaLiberado) && <SelectItem value="LISTO">Listo (liberado)</SelectItem>}
+          {(!loteFijo || yaLiberado) && <SelectItem value="STANDBY">Con restos (resto del lote)</SelectItem>}
+          <SelectItem value="EN_PREPARACION">En Preparación (no liberado)</SelectItem>
+          <SelectItem value="SUCIO">Sucio</SelectItem>
+          <SelectItem value="CIP">En CIP</SelectItem>
+          <SelectItem value="LIMPIO">Limpio</SelectItem>
+        </SelectContent>
+      </Select>
+
+      {(requiereDatos || condicion === "EN_PREPARACION") && (
+        <div className="grid grid-cols-2 gap-2">
+          <Select value={saborId} onValueChange={setSaborId} disabled={datosFijos}>
+            <SelectTrigger className="w-full">
+              <SelectValue placeholder="Sabor" />
+            </SelectTrigger>
+            <SelectContent>
+              {sabores.map((s) => (
+                <SelectItem key={s.id} value={s.id}>
+                  {nombreSaborConFamilia(s.nombre, s.familiaNombre)}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          {condicion === "EN_PREPARACION" ? (
+            <Input
+              type="number"
+              min={0}
+              step={0.5}
+              inputMode="decimal"
+              placeholder={unidadPrep === "kits" ? "Kits" : "Tambores"}
+              value={tambores}
+              onChange={(e) => setTambores(e.target.value)}
+            />
+          ) : sinVolumen ? (
+            <p className="self-center text-xs text-muted-foreground">
+              Litros: se corrigen con «Medir tanque»
+            </p>
+          ) : (
+            <Input
+              type="number"
+              min={0}
+              max={20000}
+              placeholder="Volumen (L)"
+              value={volumenL}
+              onChange={(e) => setVolumenL(e.target.value)}
+            />
+          )}
+          <Input
+            className="col-span-2"
+            placeholder="Lote"
+            value={lote}
+            onChange={(e) => setLote(e.target.value)}
+            disabled={datosFijos}
+          />
+          {datosFijos && (
+            <p className="col-span-2 text-xs text-muted-foreground">
+              Con Calidad, el sabor y el lote de un tanque liberado no se cambian. Un lote nuevo va En Preparación.
+            </p>
+          )}
+          {condicion === "EN_PREPARACION" && (
+            <p className="col-span-2 text-xs text-muted-foreground">
+              {volumenDeTambores !== null
+                ? `≈ ${volumenDeTambores.toLocaleString("es-CO")} L (${unidadPrep} × volumen del sabor). Se guarda sin liberar.`
+                : `Sabor + ${unidadPrep} + lote — o deja los 3 vacíos para marcar el tanque En Preparación sin datos.`}
+            </p>
+          )}
+        </div>
+      )}
+
+      {error && (
+        <p className="text-xs text-destructive" role="alert">
+          {error}
+        </p>
+      )}
+
+      <div className="flex gap-2">
+        <Button size="sm" disabled={!datosValidos || guardando} onClick={guardar}>
+          {guardando ? <Loader2 className="size-3.5 animate-spin" /> : null}
+          {guardarTexto}
+        </Button>
+        {onCancelar && (
+          <Button size="sm" variant="ghost" onClick={onCancelar}>
+            Cancelar
+          </Button>
+        )}
+      </div>
+    </div>
+  )
+}

@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <link rel="icon" type="image/png" href="/IconoNatulac.png" />
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <meta name="theme-color" content="#ffffff" />
+  <meta name="apple-mobile-web-app-title" content="Natulac" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Producción Natulac</title>
+  <script>
+    // Modo oscuro antes de que cargue la app (sin destello blanco). Misma clave que src/lib/tema.ts.
+    try {
+      var t = localStorage.getItem("natulac-tema")
+      var oscuro = t === "oscuro" || (t !== "claro" && window.matchMedia("(prefers-color-scheme: dark)").matches)
+      if (oscuro) {
+        document.documentElement.classList.add("dark")
+        document.documentElement.style.colorScheme = "dark"
+        document.querySelector('meta[name="theme-color"]').setAttribute("content", "#1b2230")
+      }
+    } catch (e) {}
+    // Tamaño de letra elegido en Ajustes, antes de que cargue la app. Misma clave que src/lib/tamanoLetra.ts.
+    try {
+      var letra = localStorage.getItem("natulac-letra")
+      if (letra === "grande") document.documentElement.style.fontSize = "112.5%"
+      if (letra === "muy-grande") document.documentElement.style.fontSize = "125%"
+    } catch (e) {}
+  </script>
+</head>
+
+<body>
+  <div id="root"></div>
+  <script type="module" src="/src/main.tsx"></script>
+</body>
+
+</html>

@@ -1,0 +1,128 @@
+import { BroomSparkles, PauseCircle, RefreshCw, Square } from "lucide-react"
+import { cn } from "@/lib/utils"
+import { EnvasePixel } from "@/components/pixel/EnvasePixel"
+import { interpretarSabor } from "@/components/pixel/armarJugo"
+
+export type EstadoVisualLinea = "corriendo" | "parada" | "terminada" | "cip" | "cambio_presentacion" | "libre"
+
+const CANT_ENVASES = 4
+/** Los envases pixel art son más anchos que las cajitas lisas: caben 3. */
+const CANT_ENVASES_PIXEL = 3
+
+/**
+ * Dibujo de la llenadora — a propósito bien distinto del tanque
+ * (TanqueVisual.tsx, un vidrio vertical con líquido, con marco
+ * cuadrado): acá NO hay marco/recuadro ni cabezal — es solo una fila
+ * de cajas tetra pak centrada, flotando directo sobre el fondo de la
+ * tarjeta, coloreadas por el sabor que está pasando. Corriendo = las
+ * cajas van llenándose una a una (parpadeo escalonado, ver
+ * "alert-pulse" en src/index.css); el resto de los estados usa solo
+ * un ícono + texto, sin fondo propio. Se usa en Preparación/Status
+ * (EstadoPlantaTabs.tsx) y Finalizar Turno — a propósito NO en el
+ * Panel de Producción (dashboard).
+ *
+ * Si llega `saborNombre` y se reconoce (ver interpretarSabor en
+ * src/components/pixel/armarJugo.ts), las cajitas son el envase PIXEL ART
+ * de ese sabor/familia/presentación en vez de rectángulos de color.
+ */
+export function LineaVisual({
+  numeroLinea,
+  estado,
+  color,
+  square = false,
+  saborNombre = null,
+  presentacion = null,
+}: {
+  numeroLinea: number
+  estado: EstadoVisualLinea
+  color: string
+  square?: boolean
+  /** Nombre del sabor que está pasando ("Pera (Jucosa)", "Té de Durazno"...) — para dibujar el envase pixel art. */
+  saborNombre?: string | null
+  /** Código de presentación ("1000", "500"...). Si no llega, se dibuja el de 1 litro. */
+  presentacion?: string | null
+}) {
+  const corriendo = estado === "corriendo"
+  const conEnvases = corriendo || estado === "parada"
+  const jugoPixel = interpretarSabor(saborNombre)
+
+  return (
+    <div className={cn("relative shrink-0", square ? "size-32" : "h-44 w-full")}>
+      {conEnvases && jugoPixel && (
+        <div className="absolute inset-0 flex items-end justify-center gap-[7%] pb-[14%]">
+          {Array.from({ length: CANT_ENVASES_PIXEL }).map((_, i) => (
+            <EnvasePixel
+              key={i}
+              presentacion={presentacion ?? "1000"}
+              familia={jugoPixel.familia}
+              sabor={jugoPixel.sabor}
+              zoom={2}
+              className={cn(corriendo && "alert-pulse")}
+              style={{ opacity: corriendo ? 1 : 0.3, animationDelay: `${i * 0.35}s` }}
+            />
+          ))}
+        </div>
+      )}
+
+      {conEnvases && !jugoPixel && (
+        <div className="absolute inset-0 flex items-center justify-center gap-[9%]">
+          {Array.from({ length: CANT_ENVASES }).map((_, i) => (
+            <div
+              key={i}
+              className={cn("relative h-8 w-5 rounded-[2px] border border-border/70", corriendo && "alert-pulse")}
+              style={{ backgroundColor: color, opacity: corriendo ? 0.85 : 0.25, animationDelay: `${i * 0.35}s` }}
+            >
+              <div className="absolute inset-x-0 top-[5px] h-px bg-background/50" />
+            </div>
+          ))}
+        </div>
+      )}
+
+      {estado === "terminada" && (
+        <div className="absolute inset-0 grid place-items-center">
+          <Square className={cn("text-warning-foreground", square ? "size-9" : "size-12")} aria-hidden="true" />
+          <span className="absolute inset-x-0 top-8 text-center text-xs font-medium uppercase tracking-wide text-muted-foreground">
+            Terminó Lote
+          </span>
+        </div>
+      )}
+
+      {estado === "cip" && (
+        <div className="absolute inset-0 grid place-items-center">
+          <BroomSparkles className={cn("text-foreground/70", square ? "size-10" : "size-11")} aria-hidden="true" />
+          <span className="absolute inset-x-0 top-8 text-center text-xs font-medium uppercase tracking-wide text-muted-foreground">
+            CIP
+          </span>
+        </div>
+      )}
+
+      {estado === "cambio_presentacion" && (
+        <div className="absolute inset-0 grid place-items-center">
+          <RefreshCw className={cn("text-muted-foreground", square ? "size-9" : "size-12")} aria-hidden="true" />
+          <span className="absolute inset-x-0 top-8 text-center text-xs font-medium uppercase tracking-wide text-muted-foreground">
+            Cambio Present.
+          </span>
+        </div>
+      )}
+
+      {estado === "libre" && (
+        <div className="absolute inset-0 grid place-items-center">
+          <PauseCircle className={cn("text-muted-foreground", square ? "size-9" : "size-12")} aria-hidden="true" />
+          <span className="absolute inset-x-0 top-8 text-center text-xs font-medium uppercase tracking-wide text-muted-foreground">
+            Libre
+          </span>
+        </div>
+      )}
+
+      <span className="absolute left-2 top-2 rounded-md border border-border bg-background/80 px-1.5 py-0.5 text-xs font-bold tracking-wide text-foreground">
+        L{numeroLinea}
+      </span>
+
+      {estado === "parada" && (
+        <span className="absolute right-2 top-2 grid size-5 place-items-center rounded-full border border-warning/40 bg-background/85 text-warning-foreground">
+          <PauseCircle className="size-3" aria-hidden="true" />
+        </span>
+      )}
+    </div>
+  )
+}

@@ -1,0 +1,495 @@
+import { supabase } from "@/lib/supabase"
+import { MENSAJE_SOLO_LECTURA, rpcBloqueada } from "@/lib/soloLectura"
+import type { AreaCodigo, GrupoCodigo, TurnoTipoCodigo } from "@/lib/catalogos"
+import { saborSinFamiliaOculta } from "@/lib/turno"
+import type { EsquemaTurnos, ResponsableTurno, TanqueEncontrado } from "@/lib/sesionTurno"
+import {
+  mapearAjusteVolumen,
+  mapearDesvaseLote,
+  mapearPreparacion,
+  mapearSalidaVacio,
+  mapearTanque,
+  mapearTransferencia,
+  salidasComoDesvases,
+} from "@/lib/preparacion/mapear"
+import { adjuntarTotales } from "@/lib/preparacion/totalesLote"
+import type {
+  AjusteVolumenRegistro,
+  DesvaseLoteRegistro,
+  FilaAjusteVolumen,
+  FilaDesvaseLote,
+  FilaPreparacion,
+  FilaSalidaVacio,
+  FilaTanque,
+  FilaTransferencia,
+  PreparacionRegistro,
+  SalidaVacioRegistro,
+  TanqueRecepcion,
+  TransferenciaRegistro,
+} from "@/lib/preparacion/tipos"
+import { mapearContador, mapearCorrida, mapearLineaEstado } from "@/lib/produccion/mapear"
+import type { Corrida, ContadorRegistro, FilaContador, FilaCorrida, FilaLineaEstado, LineaEstado } from "@/lib/produccion/tipos"
+import { mapearProductoTerminado } from "@/lib/productoTerminado"
+import type { FilaProductoTerminado, ProductoTerminadoRegistro } from "@/lib/productoTerminado"
+import { mapearNovedadTurno } from "@/lib/novedades"
+import type { FilaNovedadTurno, NovedadTurno } from "@/lib/novedades"
+
+/*
+ * Auditoría (Super Administrador — todas las áreas menos PRUEBAS — y
+ * Administrador de Área, acotado a la suya): buscar cualquier turno
+ * por supervisor y/o rango de fechas, y ver su registro de acciones
+ * completo (construirHistorial(), src/lib/historial.ts). Reutiliza el
+ * mismo "turno_json" que arma turno_activo_de() (ver
+ * supabase/migrations/20260901090000_historial_auditoria.sql).
+ * También vive acá lo de actas (PDF real, ver src/lib/actaPdf.ts) y el
+ * vistazo de turnos activos por área.
+ */
+
+/**
+ * Un turno histórico (cerrado, o en curso visto desde Auditoría) —
+ * a diferencia del turno EN VIVO de un supervisor (que cada uno de
+ * los 3 módulos busca por separado, ver usePreparacion()), acá SÍ
+ * tiene sentido un solo fetch con todo junto: no hay nada "en vivo"
+ * que sincronizar tramo por tramo. Mismos tipos de dominio que los 3
+ * módulos (Corrida/TanqueRecepcion/etc.) — no una copia propia.
+ */
+export interface TurnoHistorial {
+  id: string
+  codigo: string
+  fecha: string
+  horaInicio: string
+  estado: "ABIERTO" | "CERRADO"
+  fechaFin: string | null
+  horaFin: string | null
+  cierreAutomatico: boolean
+  turnoTipo: TurnoTipoCodigo
+  grupo: GrupoCodigo
+  supervisorUsuario: string
+  supervisorNombre: string
+  /** Quién estuvo a cargo y cuándo (relevos). Vacío en turnos anteriores a la migración 20261080. */
+  responsables: ResponsableTurno[]
+  esquema: EsquemaTurnos
+  /** Lo abrió el respaldo y nadie lo asumió: su grupo sale como "Sin grupo" hasta que se asigne desde Auditoría (migración 20261084). */
+  grupoPendiente: boolean
+  /** Correcciones abiertas después del cierre (quién, motivo, cuándo). Ver migración 20261082. */
+  correcciones: CorreccionTurno[]
+  tanquesEncontrados: TanqueEncontrado[] | null
+  tanques: TanqueRecepcion[]
+  preparaciones: PreparacionRegistro[]
+  corridas: Corrida[]
+  lineasEstado: LineaEstado[]
+  contadores: ContadorRegistro[]
+  productoTerminado: ProductoTerminadoRegistro[]
+  transferencias: TransferenciaRegistro[]
+  /** Desvases a pipa + salidas a Vacío (salidasComoDesvases): todo lo que un lote entregó afuera. Solo para la merma. */
+  desvases: DesvaseLoteRegistro[]
+  /** Litros que Vacío se llevó en el turno (migración 20261109490000). */
+  salidasVacio: SalidaVacioRegistro[]
+  novedades: NovedadTurno[]
+  ajustesVolumen: AjusteVolumenRegistro[]
+}
+
+interface FilaTanqueEncontrado {
+  numero_tanque: 1 | 2 | 3
+  condicion: TanqueRecepcion["condicion"]
+  volumen_l: number | null
+  sabor_nombre: string | null
+  lote: string | null
+}
+
+/** Forma cruda de turno_json()/turno_detalle() — mismo shape que src/lib/sesionTurno.tsx (cabecera) + los 6 módulos de dominio. */
+interface FilaTurnoHistorial {
+  id: string
+  codigo: string
+  fecha: string
+  hora_inicio: string
+  estado: "ABIERTO" | "CERRADO"
+  fecha_fin: string | null
+  hora_fin: string | null
+  cierre_automatico: boolean
+  tanques_encontrados: FilaTanqueEncontrado[] | null
+  turno_tipo_codigo: string
+  grupo_codigo: string
+  supervisor_usuario: string
+  supervisor_nombre: string
+  responsables?: ResponsableTurno[]
+  esquema?: EsquemaTurnos
+  grupo_pendiente?: boolean
+  correcciones?: { nombre: string; motivo: string; creada_en: string }[]
+  lineas: FilaCorrida[]
+  lineas_estado: FilaLineaEstado[]
+  tanques: FilaTanque[]
+  contadores: FilaContador[]
+  producto_terminado: FilaProductoTerminado[]
+  preparaciones: FilaPreparacion[]
+  transferencias: FilaTransferencia[]
+  desvases: FilaDesvaseLote[]
+  salidas_vacio?: FilaSalidaVacio[]
+  novedades: FilaNovedadTurno[]
+  ajustes_volumen: FilaAjusteVolumen[]
+}
+
+export function mapearTurnoHistorial(fila: FilaTurnoHistorial): TurnoHistorial {
+  const salidasVacio = (fila.salidas_vacio ?? []).map(mapearSalidaVacio)
+  return {
+    id: fila.id,
+    codigo: fila.codigo,
+    fecha: fila.fecha,
+    horaInicio: fila.hora_inicio,
+    estado: fila.estado,
+    fechaFin: fila.fecha_fin,
+    horaFin: fila.hora_fin,
+    cierreAutomatico: fila.cierre_automatico,
+    turnoTipo: fila.turno_tipo_codigo as TurnoTipoCodigo,
+    grupo: fila.grupo_codigo as GrupoCodigo,
+    supervisorUsuario: fila.supervisor_usuario,
+    supervisorNombre: fila.supervisor_nombre,
+    responsables: fila.responsables ?? [],
+    esquema: fila.esquema ?? "3x8",
+    grupoPendiente: fila.grupo_pendiente ?? false,
+    correcciones: (fila.correcciones ?? []).map((c) => ({ nombre: c.nombre, motivo: c.motivo, creadaEn: c.creada_en })),
+    tanquesEncontrados:
+      fila.tanques_encontrados?.map((t) => ({
+        numeroTanque: t.numero_tanque,
+        condicion: t.condicion,
+        volumenL: t.volumen_l,
+        saborNombre: saborSinFamiliaOculta(t.sabor_nombre),
+        lote: t.lote,
+      })) ?? null,
+    tanques: fila.tanques.map(mapearTanque),
+    preparaciones: fila.preparaciones.map(mapearPreparacion),
+    corridas: fila.lineas.map(mapearCorrida),
+    lineasEstado: fila.lineas_estado.map(mapearLineaEstado),
+    contadores: fila.contadores.map(mapearContador),
+    productoTerminado: fila.producto_terminado.map(mapearProductoTerminado),
+    transferencias: fila.transferencias.map(mapearTransferencia),
+    desvases: [...fila.desvases.map(mapearDesvaseLote), ...salidasComoDesvases(salidasVacio)],
+    salidasVacio,
+    novedades: fila.novedades.map(mapearNovedadTurno),
+    ajustesVolumen: fila.ajustes_volumen.map(mapearAjusteVolumen),
+  }
+}
+
+export interface CorreccionTurno {
+  nombre: string
+  motivo: string
+  creadaEn: string
+}
+
+export interface TurnoResumen {
+  id: string
+  codigo: string
+  fecha: string
+  horaInicio: string
+  estado: "ABIERTO" | "CERRADO"
+  supervisorUsuario: string
+  supervisorNombre: string
+  area: AreaCodigo
+  turnoTipo: TurnoTipoCodigo
+  grupo: GrupoCodigo
+}
+
+interface FilaResumen {
+  turno_id: string
+  codigo: string
+  fecha: string
+  hora_inicio: string
+  estado: "ABIERTO" | "CERRADO"
+  supervisor_usuario: string
+  supervisor_nombre: string
+  area_codigo: string
+  turno_tipo_codigo: string
+  grupo_codigo: string
+}
+
+export async function listarTurnosHistorial(
+  usuarioSesion: string,
+  filtros: { supervisorUsuario?: string; fechaDesde?: string; fechaHasta?: string },
+): Promise<TurnoResumen[]> {
+  const { data, error } = await supabase.rpc("listar_turnos_historial", {
+    p_usuario: usuarioSesion,
+    p_supervisor_usuario: filtros.supervisorUsuario || null,
+    p_fecha_desde: filtros.fechaDesde || null,
+    p_fecha_hasta: filtros.fechaHasta || null,
+  })
+  if (error || !data) return []
+  return (data as FilaResumen[]).map((f) => ({
+    id: f.turno_id,
+    codigo: f.codigo,
+    fecha: f.fecha,
+    horaInicio: f.hora_inicio,
+    estado: f.estado,
+    supervisorUsuario: f.supervisor_usuario,
+    supervisorNombre: f.supervisor_nombre,
+    area: f.area_codigo as AreaCodigo,
+    turnoTipo: f.turno_tipo_codigo as TurnoTipoCodigo,
+    grupo: f.grupo_codigo as GrupoCodigo,
+  }))
+}
+
+export async function obtenerTurnoDetalle(usuarioSesion: string, turnoId: string): Promise<TurnoHistorial | null> {
+  const { data, error } = await supabase.rpc("turno_detalle", { p_usuario: usuarioSesion, p_turno_id: turnoId })
+  if (error || !data) return null
+  const [turno] = await adjuntarTotales([mapearTurnoHistorial(data as FilaTurnoHistorial)])
+  return turno
+}
+
+/** Mismo turno_json() que obtenerTurnoDetalle(), pero solo para EL PROPIO turno del supervisor (ver src/lib/actasPendientes.ts). */
+/** Pone el grupo real a un turno cerrado que quedó "Sin grupo" (TURNO_CORREGIR). Queda como corrección. */
+export async function asignarGrupoTurno(
+  usuarioSesion: string,
+  turnoId: string,
+  grupo: GrupoCodigo,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  const { error } = await supabase.rpc("asignar_grupo_turno", {
+    p_usuario: usuarioSesion,
+    p_turno_id: turnoId,
+    p_grupo_codigo: grupo,
+  })
+  if (error) return { ok: false, error: error.message || "No se pudo asignar el grupo." }
+  return { ok: true }
+}
+
+export async function miTurnoDetalle(usuarioSesion: string, turnoId: string): Promise<TurnoHistorial | null> {
+  const { data, error } = await supabase.rpc("mi_turno_detalle", { p_usuario: usuarioSesion, p_turno_id: turnoId })
+  if (error || !data) return null
+  const [turno] = await adjuntarTotales([mapearTurnoHistorial(data as FilaTurnoHistorial)])
+  return turno
+}
+
+/** Turnos CERRADOS por cierre_automatico (cron, abandonados) del propio supervisor que todavía no tienen acta VIGENTE. */
+export async function misTurnosSinActa(usuarioSesion: string): Promise<{ turnoId: string; turnoCodigo: string }[]> {
+  const { data, error } = await supabase.rpc("mis_turnos_sin_acta", { p_usuario: usuarioSesion })
+  if (error || !data) return []
+  return (data as { turno_id: string; turno_codigo: string }[]).map((f) => ({ turnoId: f.turno_id, turnoCodigo: f.turno_codigo }))
+}
+
+/** Borrado real: solo permite turnos CERRADOS (Postgres lo rechaza si no). */
+export async function eliminarTurno(
+  usuarioSesion: string,
+  turnoId: string,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  const { error } = await supabase.rpc("eliminar_turno", { p_usuario: usuarioSesion, p_turno_id: turnoId })
+  if (error) {
+    return { ok: false, error: error.message || "No se pudo eliminar el turno. Intenta de nuevo." }
+  }
+  return { ok: true }
+}
+
+// reabrirTurno() y corregirProductoTerminado() se retiraron en la Fase 2
+// del rework (migración 20261013090000): no hay corrección de un turno ya
+// cerrado a mitad de camino — se espera al cierre y se corrige desde VALIDAR.
+
+export interface Acta {
+  id: string
+  turnoId: string
+  version: number
+  codigo: string
+  estado: "VIGENTE" | "ANULADA"
+  storagePath: string
+  generadoEn: string
+  turnoCodigo: string
+  fecha: string
+  supervisorNombre: string
+  area: AreaCodigo
+}
+
+interface FilaActa {
+  acta_id: string
+  turno_id: string
+  version: number
+  codigo: string
+  estado: "VIGENTE" | "ANULADA"
+  storage_path: string
+  generado_en: string
+  turno_codigo: string
+  fecha: string
+  supervisor_nombre: string
+  area_codigo: string
+}
+
+/** Pestaña "Actas" de Auditoría — todas las versiones (vigentes y anuladas) dentro del alcance del usuario. */
+export async function listarActas(
+  usuarioSesion: string,
+  filtros: { areaCodigo?: string; fechaDesde?: string; fechaHasta?: string } = {},
+): Promise<Acta[]> {
+  const { data, error } = await supabase.rpc("listar_actas", {
+    p_usuario: usuarioSesion,
+    p_area_codigo: filtros.areaCodigo || null,
+    p_fecha_desde: filtros.fechaDesde || null,
+    p_fecha_hasta: filtros.fechaHasta || null,
+  })
+  if (error || !data) return []
+  return (data as FilaActa[]).map((f) => ({
+    id: f.acta_id,
+    turnoId: f.turno_id,
+    version: f.version,
+    codigo: f.codigo,
+    estado: f.estado,
+    storagePath: f.storage_path,
+    generadoEn: f.generado_en,
+    turnoCodigo: f.turno_codigo,
+    fecha: f.fecha,
+    supervisorNombre: f.supervisor_nombre,
+    area: f.area_codigo as AreaCodigo,
+  }))
+}
+
+export interface MiActa {
+  id: string
+  turnoId: string
+  codigo: string
+  storagePath: string
+  generadoEn: string
+  turnoCodigo: string
+  fecha: string
+  turnoTipo: TurnoTipoCodigo
+  grupo: GrupoCodigo
+  /** Quién supervisó el turno y de qué área — para el Super Admin, que ve las actas de todos (migración 20261097). */
+  supervisorNombre: string | null
+  areaNombre: string | null
+}
+
+interface FilaMiActa {
+  acta_id: string
+  turno_id: string
+  codigo: string
+  storage_path: string
+  generado_en: string
+  turno_codigo: string
+  fecha: string
+  turno_tipo_codigo: string
+  grupo_codigo: string
+  supervisor_nombre?: string | null
+  area_nombre?: string | null
+}
+
+/** "Mis Actas" (Home del supervisor) — las actas VIGENTES de SUS propios turnos, sin exigir rol. El Super Administrador ve las de todos (20261097). */
+export async function misActas(usuarioSesion: string): Promise<MiActa[]> {
+  const { data, error } = await supabase.rpc("mis_actas", { p_usuario: usuarioSesion })
+  if (error || !data) return []
+  return (data as FilaMiActa[]).map((f) => ({
+    id: f.acta_id,
+    turnoId: f.turno_id,
+    codigo: f.codigo,
+    storagePath: f.storage_path,
+    generadoEn: f.generado_en,
+    turnoCodigo: f.turno_codigo,
+    fecha: f.fecha,
+    turnoTipo: f.turno_tipo_codigo as TurnoTipoCodigo,
+    grupo: f.grupo_codigo as GrupoCodigo,
+    supervisorNombre: f.supervisor_nombre ?? null,
+    areaNombre: f.area_nombre ?? null,
+  }))
+}
+
+/*
+ * Los PDF de actas viven en una carpeta del servidor de planta (servicio
+ * "archivos" de docker-compose.yml, ver archivos/servidor.mjs), con las
+ * mismas rutas que tenían en el bucket de Supabase (actas.storage_path).
+ */
+const RUTA_ACTAS = "/archivos/actas"
+
+/** URL para descargar/ver el PDF directo (las actas son de lectura libre). */
+export function urlPublicaActa(storagePath: string): string {
+  return `${window.location.origin}${RUTA_ACTAS}/${storagePath.split("/").map(encodeURIComponent).join("/")}`
+}
+
+export interface ActaRegistrada {
+  id: string
+  turnoId: string
+  version: number
+  codigo: string
+  estado: "VIGENTE" | "ANULADA"
+  storagePath: string
+  generadoEn: string
+}
+
+/** Sube el PDF ya generado (ver src/lib/actaPdf.ts) al servidor y registra la versión — anula la vigente anterior de este turno, si había una. */
+export async function subirYRegistrarActa(
+  usuarioSesion: string,
+  turnoId: string,
+  areaCodigo: string,
+  codigoTurno: string,
+  pdfBlob: Blob,
+): Promise<{ ok: true; acta: ActaRegistrada } | { ok: false; error: string }> {
+  // Solo lectura: frenar antes de subir el PDF (la subida no pasa por supabase.rpc).
+  if (rpcBloqueada("registrar_acta")) return { ok: false, error: MENSAJE_SOLO_LECTURA }
+  const ruta = `${areaCodigo}/${turnoId}/${codigoTurno}-${Date.now()}.pdf`
+
+  try {
+    const respuesta = await fetch(urlPublicaActa(ruta), {
+      method: "PUT",
+      headers: { "Content-Type": "application/pdf" },
+      body: pdfBlob,
+    })
+    if (!respuesta.ok) {
+      return { ok: false, error: (await respuesta.text()) || "No se pudo subir el PDF." }
+    }
+  } catch {
+    return { ok: false, error: "No se pudo subir el PDF: sin conexión con el servidor." }
+  }
+
+  const { data, error } = await supabase.rpc("registrar_acta", {
+    p_usuario: usuarioSesion,
+    p_turno_id: turnoId,
+    p_storage_path: ruta,
+  })
+  if (error || !data) {
+    return { ok: false, error: error?.message ?? "No se pudo registrar el acta." }
+  }
+
+  const fila = data as {
+    id: string
+    turno_id: string
+    version: number
+    codigo: string
+    estado: "VIGENTE" | "ANULADA"
+    storage_path: string
+    generado_en: string
+  }
+  return {
+    ok: true,
+    acta: {
+      id: fila.id,
+      turnoId: fila.turno_id,
+      version: fila.version,
+      codigo: fila.codigo,
+      estado: fila.estado,
+      storagePath: fila.storage_path,
+      generadoEn: fila.generado_en,
+    },
+  }
+}
+
+export interface TurnoActivoArea {
+  areaCodigo: AreaCodigo
+  areaNombre: string
+  turnoId: string | null
+  turnoCodigo: string | null
+  supervisorNombre: string | null
+  horaInicio: string | null
+}
+
+interface FilaTurnoActivoArea {
+  area_codigo: string
+  area_nombre: string
+  turno_id: string | null
+  turno_codigo: string | null
+  supervisor_nombre: string | null
+  hora_inicio: string | null
+}
+
+/** "¿Quién es el supervisor activo ahora mismo, por área?" — todas las áreas (menos PRUEBAS) para Super Admin, solo la propia para Administrador de Área. */
+export async function turnosActivosPorArea(usuarioSesion: string): Promise<TurnoActivoArea[]> {
+  const { data, error } = await supabase.rpc("turnos_activos_por_area", { p_usuario: usuarioSesion })
+  if (error || !data) return []
+  return (data as FilaTurnoActivoArea[]).map((f) => ({
+    areaCodigo: f.area_codigo as AreaCodigo,
+    areaNombre: f.area_nombre,
+    turnoId: f.turno_id,
+    turnoCodigo: f.turno_codigo,
+    supervisorNombre: f.supervisor_nombre,
+    horaInicio: f.hora_inicio,
+  }))
+}

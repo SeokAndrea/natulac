@@ -1,0 +1,98 @@
+import { useEffect, useState } from "react"
+import { CircleAlert } from "lucide-react"
+import { Badge } from "@/components/ui/badge"
+import { useAuth } from "@/lib/auth"
+import { useSesionTurno } from "@/lib/sesionTurno"
+import { useProduccion } from "@/lib/produccion/useProduccion"
+import { useCatalogosLive } from "@/lib/catalogosLive"
+import { TURNO_TIPOS, nombreGrupo, nombrePorCodigo } from "@/lib/catalogos"
+import { turnosActivosPorArea, type TurnoActivoArea } from "@/lib/historialTurnos"
+import { puede } from "@/lib/permisos"
+
+/*
+ * Franja fija debajo del header con Área, Supervisor activo y el
+ * estado del turno en curso. Se muestra en todas las páginas internas
+ * (Hub y AppShell) para que esa información nunca se pierda de vista,
+ * incluso si el supervisor navega entre apps.
+ *
+ * "Supervisor" solo se muestra cuando hay turno activo (ahí sí es el
+ * del turno EN CURSO, turnoActivo.supervisorNombre — importa sobre
+ * todo en el Panel de Producción, que puede mostrar el turno de
+ * cualquier supervisor, no solo el propio). Sin turno activo cae a
+ * mostrar el usuario logueado, y ese SÍ puede no ser un supervisor
+ * (Administrador de Área, Super Administrador) — por eso ahí la
+ * etiqueta pasa a decir "Usuario".
+ *
+ * turno_activo_de() (turnoActivo) es SIEMPRE el turno PROPIO del
+ * usuario logueado — para un Administrador de Área eso da null
+ * siempre (no corre turnos él mismo), y decía "Sin turno iniciado"
+ * como si le faltara arrancar uno, cuando en realidad solo quiere ver
+ * si SU área tiene un turno activo ahora mismo (la misma info que ya
+ * ve el supervisor de esa área). Para roles que no son Supervisor, se
+ * busca el turno activo del área vía turnos_activos_por_area() en vez
+ * de asumir que no hay ninguno.
+ */
+export function EstadoBanner() {
+  const { session } = useAuth()
+  const sesion = useSesionTurno()
+  const { corridas } = useProduccion()
+  const { areas, lineas } = useCatalogosLive()
+  const [turnoDeArea, setTurnoDeArea] = useState<TurnoActivoArea | null>(null)
+
+  // turnos_activos_por_area() exige AUDITORIA_VER: sin él (Calidad, Mantenimiento) daba
+  // "No tienes permiso para ver esto." en cada carga. Calidad ya ve el turno de Aséptico por turno_activo_de().
+  const mirarTurnoDeArea = session?.rol !== "SUPERVISOR" && session?.area != null && puede(session, "AUDITORIA_VER")
+
+  useEffect(() => {
+    if (!session || !mirarTurnoDeArea) return
+    turnosActivosPorArea(session.username).then((lista) => {
+      setTurnoDeArea(lista.find((t) => t.areaCodigo === session.area) ?? null)
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [session?.username, mirarTurnoDeArea])
+
+  if (!session) return null
+
+  return (
+    <div className="border-b border-border/70 bg-muted/40">
+      <div className="mx-auto flex max-w-[1600px] flex-wrap items-center gap-x-5 gap-y-1.5 px-4 py-2 text-xs sm:px-6 sm:text-sm">
+        <span>
+          <span className="text-muted-foreground">Área: </span>
+          <span className="font-medium text-foreground">
+            {session.area ? nombrePorCodigo(areas, session.area) : "Todas las áreas"}
+          </span>
+        </span>
+        <span>
+          <span className="text-muted-foreground">{sesion.turnoId ? "Supervisor: " : "Usuario: "}</span>
+          <span className="font-medium text-foreground">{sesion.turnoId ? sesion.supervisorNombre : session.nombre}</span>
+        </span>
+
+        {sesion.cargando ? null : sesion.turnoId ? (
+          <span className="flex flex-wrap items-center gap-x-1.5 gap-y-1">
+            <span className="text-muted-foreground">Turno:</span>
+            <span className="font-medium text-foreground">
+              {sesion.turnoTipo ? nombrePorCodigo(TURNO_TIPOS, sesion.turnoTipo) : "—"} ·{" "}
+              {sesion.grupo ? nombreGrupo(sesion.grupo) : "—"} ·{" "}
+              {(() => {
+                const activas = corridas.filter((l) => l.activa)
+                return activas.length === 0 ? "sin líneas (parada)" : activas.map((l) => nombrePorCodigo(lineas, l.linea)).join(", ")
+              })()}
+            </span>
+            <Badge variant="secondary">{sesion.codigo}</Badge>
+          </span>
+        ) : mirarTurnoDeArea && turnoDeArea?.turnoId ? (
+          <span className="flex flex-wrap items-center gap-x-1.5 gap-y-1">
+            <span className="text-muted-foreground">Turno:</span>
+            <span className="font-medium text-foreground">Activo · Supervisor {turnoDeArea.supervisorNombre}</span>
+            <Badge variant="secondary">{turnoDeArea.turnoCodigo}</Badge>
+          </span>
+        ) : (
+          <span className="flex items-center gap-1.5 text-amber-700 dark:text-amber-500">
+            <CircleAlert className="size-3.5" />
+            Sin turno iniciado
+          </span>
+        )}
+      </div>
+    </div>
+  )
+}
